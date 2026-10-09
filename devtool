@@ -1,0 +1,727 @@
+#!/usr/bin/env python3
+import os
+import sys
+import re
+import json
+import argparse
+import subprocess
+import fnmatch
+import difflib
+from pathlib import Path
+
+AI_DIR_NAME = ".ai"
+DEFAULT_DUMP_NAME = "dump.txt"
+DEFAULT_PATCH_NAME = "patch.txt"
+DUMPIGNORE_NAME = "dumpignore"
+CONFIG_NAME = "config.json"
+CHECKPOINT_PREFIX = "[USER-CHECKPOINT]"
+
+# --- УНИВЕРСАЛЬНЫЙ GITIGNORE (покрывает ~95% проектов) ---
+DEFAULT_GITIGNORE_TEMPLATE = """# Dependencies & Virtual Environments
+node_modules/
+.venv/
+venv/
+env/
+vendor/
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build & output artifacts
+dist/
+build/
+out/
+target/
+bin/
+obj/
+*.egg-info/
+
+# IDEs & Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment & secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Logs & OS Files
+*.log
+.DS_Store
+Thumbs.db
+
+# AI Workdir
+.ai/
+"""
+
+# --- УНИВЕРСАЛЬНЫЙ DUMPIGNORE ДЛЯ ДАМПА КОНТЕКСТА ---
+DEFAULT_DUMPIGNORE_TEMPLATE = """# ========================================================
+# Rules for excluding files and directories from AI dump
+# ========================================================
+
+# System & AI
+.git/
+.ai/
+
+# Dependencies & Environments
+node_modules/
+.venv/
+venv/
+env/
+vendor/
+
+# Byte-compiled & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Build artifacts & packages
+dist/
+build/
+out/
+target/
+bin/
+obj/
+*.egg-info/
+
+# Lockfiles (тяжелые, обычно не нужны в контексте LLM)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Cargo.lock
+poetry.lock
+
+# IDE & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets & environment
+.env*
+*.pem
+*.key
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db
+"""
+
+# Универсальный список текстовых расширений исходного кода и конфигов
+TEXT_EXTENSIONS = {
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".md", ".rst", ".txt",
+    ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".cs", ".java", ".kt", ".kts",
+    ".go", ".rs", ".php", ".rb", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1",
+    ".sql", ".dockerfile", ".env.example", ".gitignore", ".gitattributes", ".ini", ".cfg", ".conf",
+    ".proto", ".graphql", ".gql", ".vue", ".svelte", ".lua", ".zig", ".dart", ".swift", ".scala", ".r", ".m"
+}
+
+COMMIT_PATTERN = re.compile(r"^<{7}\s*COMMIT\s*\n(.*?)\n>{7}\s*COMMIT", re.DOTALL)
+CREATE_PATTERN = re.compile(r"<{7}\s*CREATE:\s*([^\n\r]+?)\s*\n(.*?)>{7}\s*CREATE", re.DOTALL)
+DELETE_PATTERN = re.compile(r"<{7}\s*DELETE:\s*([^\n\r]+?)\s*\n>{7}\s*DELETE", re.DOTALL)
+
+REPLACE_PATTERN = re.compile(
+    r"<{7}\s*SEARCH:\s*([^\n\r]+?)\s*\n"
+    r"((?:(?!<{7}|={7}|>{7}).)*?)"
+    r"\n={7}[ \t]*\n"
+    r"((?:(?!<{7}|>{7}).)*?)"
+    r"(?:\n|^)>{7}[ \t]*REPLACE",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def run_git(args, check=True, cwd=None):
+    res = subprocess.run(["git"] + args, capture_output=True, text=True, cwd=cwd)
+    if check and res.returncode != 0:
+        err = res.stderr.strip() or res.stdout.strip()
+        print(f"\n❌ Git error (`git {' '.join(args)}`):\n{err}\n")
+        raise subprocess.CalledProcessError(res.returncode, ["git"] + args, output=res.stdout, stderr=res.stderr)
+    return res
+
+
+def is_git_repo(root: Path) -> bool:
+    res = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                         capture_output=True, text=True)
+    return res.returncode == 0
+
+
+def get_current_branch(root: Path) -> str:
+    res = subprocess.run(["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+                         capture_output=True, text=True)
+    return res.stdout.strip() if res.returncode == 0 else "main"
+
+
+def get_project_root() -> Path:
+    try:
+        res = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        if res.returncode == 0:
+            return Path(res.stdout.strip())
+    except Exception:
+        pass
+    return Path.cwd()
+
+
+def get_ai_paths():
+    root = get_project_root()
+    ai_dir = root / AI_DIR_NAME
+    return root, ai_dir, ai_dir / DEFAULT_DUMP_NAME, ai_dir / DEFAULT_PATCH_NAME, ai_dir / DUMPIGNORE_NAME
+
+
+def resolve_path(p_str: str, root: Path) -> Path:
+    p = Path(p_str.strip()).expanduser()
+    return p if p.is_absolute() else root / p
+
+
+def load_config(ai_dir: Path) -> dict:
+    cfg_file = ai_dir / CONFIG_NAME
+    if cfg_file.exists():
+        try:
+            return json.loads(cfg_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_config(ai_dir: Path, cfg: dict):
+    ai_dir.mkdir(parents=True, exist_ok=True)
+    (ai_dir / CONFIG_NAME).write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ============================================================================
+#                                DUMPIGNORE
+# ============================================================================
+
+def load_dumpignore_rules(dumpignore_path: Path) -> list[str]:
+    if not dumpignore_path.exists():
+        dumpignore_path.parent.mkdir(parents=True, exist_ok=True)
+        dumpignore_path.write_text(DEFAULT_DUMPIGNORE_TEMPLATE, encoding="utf-8")
+
+    rules = []
+    for line in dumpignore_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        rules.append(line)
+    return rules
+
+
+def should_ignore(rel_path: Path, is_dir: bool, rules: list[str]) -> bool:
+    path_str = str(rel_path).replace("\\", "/")
+    name = rel_path.name
+
+    for rule in rules:
+        rule = rule.replace("\\", "/")
+        if rule.endswith("/"):
+            clean_rule = rule.rstrip("/")
+            if is_dir:
+                if fnmatch.fnmatch(name, clean_rule) or fnmatch.fnmatch(path_str, clean_rule) or fnmatch.fnmatch(path_str, f"*/{clean_rule}"):
+                    return True
+            else:
+                parts = rel_path.parts[:-1]
+                if any(fnmatch.fnmatch(p, clean_rule) for p in parts):
+                    return True
+        else:
+            if fnmatch.fnmatch(name, rule) or fnmatch.fnmatch(path_str, rule) or fnmatch.fnmatch(path_str, f"*/{rule}"):
+                return True
+    return False
+
+
+# ============================================================================
+#                       EXACT MATCH & SIMILARITY HELPER
+# ============================================================================
+
+def find_closest_match(content: str, search_block: str) -> str | None:
+    """Ищет наиболее похожий фрагмент файла с помощью скользящего окна (для диагностики)."""
+    target_lines = [line.strip() for line in search_block.strip().splitlines() if line.strip()]
+    if not target_lines:
+        return None
+
+    content_lines = content.splitlines()
+    content_lines_stripped = [l.strip() for l in content_lines]
+    target_len = len(target_lines)
+
+    if len(content_lines) <= target_len:
+        ratio = difflib.SequenceMatcher(None, target_lines, content_lines_stripped).ratio()
+        return content if ratio >= 0.4 else None
+
+    best_ratio = 0.0
+    best_slice = None
+
+    min_win = max(1, target_len - 3)
+    max_win = min(len(content_lines), target_len + 4)
+
+    for win in range(min_win, max_win + 1):
+        for i in range(len(content_lines) - win + 1):
+            chunk = content_lines_stripped[i:i + win]
+            ratio = difflib.SequenceMatcher(None, target_lines, chunk).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_slice = (i, i + win)
+
+    if best_ratio >= 0.45 and best_slice:
+        return "\n".join(content_lines[best_slice[0]:best_slice[1]])
+    return None
+
+
+def exact_find_and_replace(content: str, search_block: str, replace_block: str) -> tuple[str, bool, str]:
+    if search_block not in content:
+        return content, False, "Точный блок SEARCH не найден в файле."
+    count = content.count(search_block)
+    if count > 1:
+        return content, False, f"Точный блок встречается в файле {count} раз(а). Необходим более уникальный контекст."
+    return content.replace(search_block, replace_block, 1), True, "100% совпадение"
+
+
+# ============================================================================
+#                                   INIT
+# ============================================================================
+
+def init_project(init_git: bool = False, remote_url: str | None = None):
+    root = Path.cwd()
+    ai_dir = root / AI_DIR_NAME
+    ai_dir.mkdir(exist_ok=True)
+
+    print(f"🚀 Инициализация AI DevTool в: {root}")
+
+    has_git = is_git_repo(root)
+    setup_git = init_git or bool(remote_url)
+
+    if setup_git and not has_git:
+        print("🌱 Инициализируем Git-репозиторий...")
+        try:
+            run_git(["init", "-b", "main"], cwd=root)
+        except subprocess.CalledProcessError:
+            run_git(["init"], cwd=root)
+            run_git(["branch", "-M", "main"], cwd=root)
+
+        try:
+            run_git(["config", "user.name"], cwd=root)
+        except subprocess.CalledProcessError:
+            run_git(["config", "user.name", "DevTool User"], cwd=root)
+            run_git(["config", "user.email", "devtool@local"], cwd=root)
+        has_git = True
+
+    if has_git:
+        gitignore = root / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text(DEFAULT_GITIGNORE_TEMPLATE, encoding="utf-8")
+            print("📝 Создан .gitignore")
+        else:
+            content = gitignore.read_text(encoding="utf-8")
+            if f"{AI_DIR_NAME}/" not in content and AI_DIR_NAME not in content:
+                with open(gitignore, "a", encoding="utf-8") as f:
+                    f.write(f"\n# AI DevTool workdir\n{AI_DIR_NAME}/\n")
+                print("📝 Добавлена папка .ai/ в .gitignore")
+
+    if remote_url and has_git:
+        remotes = run_git(["remote"], check=False, cwd=root).stdout.split()
+        if "origin" in remotes:
+            run_git(["remote", "set-url", "origin", remote_url], cwd=root)
+            print(f"🔗 Обновлен remote origin: {remote_url}")
+        else:
+            run_git(["remote", "add", "origin", remote_url], cwd=root)
+            print(f"🔗 Добавлен remote origin: {remote_url}")
+
+    config = load_config(ai_dir)
+    config["use_git"] = has_git
+    if remote_url:
+        config["auto_push"] = True
+        config["remote"] = remote_url
+    save_config(ai_dir, config)
+
+    patch_file = ai_dir / DEFAULT_PATCH_NAME
+    if not patch_file.exists():
+        patch_file.write_text("# Вставьте ответ нейросети сюда и запустите: devtool apply\n", encoding="utf-8")
+
+    dumpignore_file = ai_dir / DUMPIGNORE_NAME
+    if not dumpignore_file.exists():
+        dumpignore_file.write_text(DEFAULT_DUMPIGNORE_TEMPLATE, encoding="utf-8")
+        print(f"📄 Создан файл исключений: {AI_DIR_NAME}/{DUMPIGNORE_NAME}")
+
+    print("✨ Готово!")
+    if has_git and remote_url:
+        print(f"🌐 Remote настроен на ветку {get_current_branch(root)}. Изменения будут пушиться при `devtool apply`.")
+
+
+# ============================================================================
+#                                   APPLY
+# ============================================================================
+
+def apply_patch(patch_path=None, force_push: bool | None = None):
+    root, ai_dir, _, default_patch, _ = get_ai_paths()
+    config = load_config(ai_dir)
+    has_git = is_git_repo(root)
+
+    target_file = Path(patch_path) if patch_path else default_patch
+    if not target_file.exists():
+        print(f"❌ Файл патча не найден: {target_file}")
+        return
+
+    patch_text = target_file.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    first_block_idx = patch_text.find("<<<<<<<")
+    if first_block_idx == -1:
+        print("❌ В файле патча нет инструкций devtool.")
+        return
+
+    first_chunk = patch_text[first_block_idx:]
+    commit_match = COMMIT_PATTERN.match(first_chunk)
+    if not commit_match:
+        print("❌ Первым блоком ОБЯЗАТЕЛЬНО должен быть <<<<<<< COMMIT ... >>>>>>> COMMIT")
+        return
+
+    commit_msg = commit_match.group(1).strip()
+    if not commit_msg:
+        print("❌ Описание коммита в блоке COMMIT не может быть пустым.")
+        return
+
+    deletes = DELETE_PATTERN.findall(patch_text)
+    creates = CREATE_PATTERN.findall(patch_text)
+
+    replaces = []
+    for m in REPLACE_PATTERN.finditer(patch_text):
+        f = m.group(1).strip()
+        search_b = m.group(2)
+        replace_b = m.group(3)
+        replaces.append((f, search_b, replace_b))
+
+    if not (creates or deletes or replaces):
+        print("❌ В файле патча нет инструкций (DELETE, CREATE или SEARCH/REPLACE).")
+        return
+
+    # ------------------ DRY RUN ПРОВЕРКА ВСЕХ ПАТЧЕЙ ------------------
+    print("\n🔍 Предварительная проверка патча...")
+    print("─" * 60)
+
+    valid_deletes, failed_deletes = [], []
+    for f in deletes:
+        target = resolve_path(f, root)
+        if target.exists():
+            valid_deletes.append(f)
+            print(f"  ✅ DELETE:  {f.strip()}")
+        else:
+            failed_deletes.append((f, "Файл не существует"))
+            print(f"  ❌ DELETE:  {f.strip()} (файл не найден)")
+
+    valid_creates, failed_creates = [], []
+    for f, content in creates:
+        valid_creates.append((f, content))
+        print(f"  ✅ CREATE:  {f.strip()}")
+
+    # Проверка SEARCH / REPLACE на копии данных файлов
+    file_sim_content = {}
+    valid_replaces, failed_replaces = [], []
+
+    for f, search_b, replace_b in replaces:
+        target = resolve_path(f, root)
+        if not target.exists():
+            failed_replaces.append((f, search_b, replace_b, "Файл не существует", None))
+            print(f"  ❌ REPLACE: {f} (файл не существует)")
+            continue
+
+        if f not in file_sim_content:
+            file_sim_content[f] = target.read_text(encoding="utf-8")
+
+        current_content = file_sim_content[f]
+        new_content, ok, reason = exact_find_and_replace(current_content, search_b, replace_b)
+        if ok:
+            file_sim_content[f] = new_content
+            valid_replaces.append((f, search_b, replace_b))
+            print(f"  ✅ REPLACE: {f} (100% совпадение)")
+        else:
+            closest = find_closest_match(current_content, search_b)
+            failed_replaces.append((f, search_b, replace_b, reason, closest))
+            print(f"  ❌ REPLACE: {f} ({reason})")
+
+    print("─" * 60)
+
+    total_ops = len(deletes) + len(creates) + len(replaces)
+    failed_ops = len(failed_deletes) + len(failed_creates) + len(failed_replaces)
+    success_ops = total_ops - failed_ops
+
+    # Вывод подробностей по ошибкам и похожих блоков
+    if failed_replaces:
+        print("\n⚠️  Детали ошибок в блоках SEARCH:")
+        for idx, (f, sb, rb, reason, closest) in enumerate(failed_replaces, 1):
+            print(f"\n[{idx}] Файл: {f}\n    Причина: {reason}")
+            if closest:
+                print("    💡 Наиболее похожий найденный блок в текущем файле:")
+                print("    " + "-" * 40)
+                for line in closest.splitlines()[:15]:
+                    print(f"    | {line}")
+                if len(closest.splitlines()) > 15:
+                    print("    | ... (обрезано)")
+                print("    " + "-" * 40)
+
+    if failed_ops > 0:
+        if success_ops == 0:
+            print("\n🛑 Все операции завершились ошибкой. Патч не может быть применен.")
+            return
+
+        print(f"\n⚠️  Готово к применению: {success_ops}, с ошибками: {failed_ops}.")
+        confirm = input("Применить только совпавшие операции? Несовпавшие останутся в patch-файле (y/N): ").strip().lower()
+        if confirm != "y":
+            print("🛑 Применение отменено пользователем.")
+            return
+
+    # ------------------ ПРИМЕНЕНИЕ ИЗМЕНЕНИЙ ------------------
+    created_checkpoint = False
+    if has_git:
+        res = run_git(["status", "--porcelain"], cwd=root)
+        if res.stdout.strip():
+            print("💾 Обнаружены ваши ручные правки. Сохраняю чекпоинт...")
+            run_git(["add", "-A"], cwd=root)
+            run_git(["commit", "-m", f"{CHECKPOINT_PREFIX} Uncommitted user edits"], cwd=root)
+            created_checkpoint = True
+
+    touched_files = set()
+
+    for f in valid_deletes:
+        target = resolve_path(f, root)
+        if target.exists():
+            target.unlink()
+            print(f"🗑️  Удален: {f.strip()}")
+
+    for f, content in valid_creates:
+        dest = resolve_path(f, root)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if content and not content.endswith("\n"):
+            content += "\n"
+        dest.write_text(content, encoding="utf-8")
+        touched_files.add(dest)
+        print(f"📄 Создан: {f.strip()}")
+
+    # Записываем успешно измененные файлы
+    files_to_write = set(f for f, _, _ in valid_replaces)
+    for f in files_to_write:
+        dest = resolve_path(f, root)
+        dest.write_text(file_sim_content[f], encoding="utf-8")
+        touched_files.add(dest)
+        print(f"✏️  Изменен: {f}")
+
+    # Перезаписываем patch-файл: оставляем ТОЛЬКО то, что не применилось
+    if failed_ops > 0:
+        remaining_patch = [f"<<<<<<< COMMIT\n{commit_msg}\n>>>>>>> COMMIT\n"]
+        for f, _ in failed_deletes:
+            remaining_patch.append(f"<<<<<<< DELETE: {f}\n>>>>>>> DELETE\n")
+        for f, content in failed_creates:
+            remaining_patch.append(f"<<<<<<< CREATE: {f}\n{content}>>>>>>> CREATE\n")
+        for f, sb, rb, _, _ in failed_replaces:
+            remaining_patch.append(f"<<<<<<< SEARCH: {f}\n{sb}\n=======\n{rb}\n>>>>>>> REPLACE\n")
+
+        target_file.write_text("\n".join(remaining_patch), encoding="utf-8")
+        print(f"\n📋 Непримененные блоки сохранены в: {target_file}")
+    else:
+        if not patch_path and default_patch.exists():
+            default_patch.write_text("# Вставьте ответ нейросети сюда и запустите: devtool apply\n", encoding="utf-8")
+
+    # ------------------ GIT COMMIT & REMOTE PUSH ------------------
+    if has_git:
+        run_git(["add", "-A"], cwd=root)
+        staged = run_git(["diff", "--cached", "--name-only"], cwd=root).stdout.strip()
+        if not staged:
+            print("\nℹ️  Изменений для коммита нет.")
+            return
+
+        full_msg = f"[LLM] {commit_msg}"
+        run_git(["commit", "-m", full_msg], cwd=root)
+        print(f"📦 Сделан коммит: \"{full_msg}\"")
+
+        should_push = force_push if force_push is not None else config.get("auto_push", False)
+        if should_push:
+            branch = get_current_branch(root)
+            print(f"🚀 Отправка изменений в remote (ветка {branch})...")
+            push_res = run_git(["push", "-u", "origin", branch], check=False, cwd=root)
+            if push_res.returncode == 0:
+                print("✅ Изменения успешно отправлены на GitHub/remote!")
+            else:
+                print(f"⚠️  Не удалось выполнить push: {push_res.stderr.strip() or push_res.stdout.strip()}")
+    else:
+        print("✅ Все совпавшие файлы обновлены на диске (без Git).")
+
+
+# ============================================================================
+#                                   ROLLBACK
+# ============================================================================
+
+def git_rollback():
+    root = get_project_root()
+    if not is_git_repo(root):
+        print("❌ Проект не является Git-репозиторием.")
+        return
+
+    try:
+        last_commit = run_git(["log", "-1", "--pretty=%B"], cwd=root).stdout.strip()
+        if not last_commit.startswith("[LLM]"):
+            confirm = input(f"⚠️  Последний коммит \"{last_commit}\" без префикса [LLM]. Точно откатить? (y/N): ")
+            if confirm.lower() != "y":
+                print("Откат отменен.")
+                return
+
+        run_git(["reset", "--hard", "HEAD~1"], cwd=root)
+        run_git(["clean", "-fd"], cwd=root)
+        print(f"✨ Коммит нейросети \"{last_commit}\" удален.")
+
+        prev_commit = run_git(["log", "-1", "--pretty=%B"], check=False, cwd=root).stdout.strip()
+        if prev_commit.startswith(CHECKPOINT_PREFIX):
+            run_git(["reset", "HEAD~1"], cwd=root)
+            print("🔄 Ваши незакоммиченные файлы возвращены в редактор в исходном виде!")
+
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Ошибка Git: {e.stderr}")
+
+
+# ============================================================================
+#                                  DUMP / TREE
+# ============================================================================
+
+def is_text_file(p: Path) -> bool:
+    if p.suffix.lower() in TEXT_EXTENSIONS or p.name.startswith("."):
+        return True
+    try:
+        with open(p, "rb") as f:
+            chunk = f.read(1024)
+            return b"\x00" not in chunk
+    except Exception:
+        return False
+
+
+def build_tree(dir_path: Path, root_path: Path, rules: list[str] | None = None, prefix: str = "") -> list:
+    tree = []
+    try:
+        entries = sorted(list(dir_path.iterdir()), key=lambda x: (x.is_file(), x.name.lower()))
+    except (PermissionError, OSError):
+        return [prefix + "└── [Доступ запрещен]"]
+
+    valid_entries = []
+    for e in entries:
+        rel = e.relative_to(root_path)
+        if rules is not None and should_ignore(rel, e.is_dir(), rules):
+            continue
+        valid_entries.append(e)
+
+    for idx, e in enumerate(valid_entries):
+        is_last = idx == len(valid_entries) - 1
+        connector = "└── " if is_last else "├── "
+        if e.is_dir():
+            tree.append(f"{prefix}{connector}{e.name}/")
+            ext = "    " if is_last else "│   "
+            tree.extend(build_tree(e, root_path, rules, prefix + ext))
+        else:
+            tree.append(f"{prefix}{connector}{e.name}")
+    return tree
+
+
+def print_tree():
+    root = get_project_root()
+    print(f"{root.name}/")
+    lines = build_tree(root, root, rules=None)
+    if lines:
+        print("\n".join(lines))
+
+
+def dump_project(output_path=None):
+    root, ai_dir, default_dump, _, dumpignore_file = get_ai_paths()
+    ai_dir.mkdir(exist_ok=True)
+    out_file = Path(output_path) if output_path else default_dump
+
+    rules = load_dumpignore_rules(dumpignore_file)
+
+    with open(out_file, "w", encoding="utf-8") as out:
+        out.write("================================================\n")
+        out.write(f" СТРУКТУРА: {root.name}\n")
+        out.write("================================================\n\n")
+        out.write(f"{root.name}/\n")
+        out.write("\n".join(build_tree(root, root, rules=rules)))
+        out.write("\n\n" + "=" * 50 + "\n\n")
+
+        out.write("<<<<<<< COMMIT\n")
+        out.write(f"Restore project from dump: {root.name}\n")
+        out.write(">>>>>>> COMMIT\n\n")
+
+        for r, dirs, files in os.walk(root):
+            rel_root = Path(r).relative_to(root)
+            dirs[:] = [
+                d for d in dirs
+                if not should_ignore(rel_root / d if str(rel_root) != "." else Path(d), True, rules)
+            ]
+
+            for file in files:
+                fp = Path(r) / file
+                rel = fp.relative_to(root)
+                if should_ignore(rel, False, rules):
+                    continue
+                if not is_text_file(fp):
+                    continue
+                try:
+                    content = fp.read_text(encoding="utf-8", errors="replace")
+                    out.write(f"<<<<<<< CREATE: {rel}\n{content}")
+                    if not content.endswith("\n"):
+                        out.write("\n")
+                    out.write(">>>>>>> CREATE\n\n")
+                except Exception as e:
+                    print(f"⚠️  Пропуск {fp}: {e}")
+
+    print(f"✅ Дамп готов: {out_file}")
+    print(f"📋 Правила фильтрации взяты из: {AI_DIR_NAME}/{DUMPIGNORE_NAME}")
+
+
+# ============================================================================
+#                                     CLI
+# ============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(prog="devtool", description="AI DevTool - локальный инструмент интеграции с LLM")
+    subparsers = parser.add_subparsers(dest="command")
+
+    init_p = subparsers.add_parser("init", help="Инициализировать AI окружение в проекте")
+    init_p.add_argument("--git", action="store_true", help="Создать локальный Git-репозиторий")
+    init_p.add_argument("--remote", help="URL GitHub/GitLab репозитория (включает Git и авто-пуш)")
+
+    dump_p = subparsers.add_parser("dump", help="Собрать контекст проекта для LLM")
+    dump_p.add_argument("-o", "--output", help="Путь к файлу дампа")
+
+    apply_p = subparsers.add_parser("apply", help="Применить патч от LLM")
+    apply_p.add_argument("file", nargs="?", help="Путь к файлу патча (по умолчанию .ai/patch.txt)")
+    apply_p.add_argument("--push", dest="push", action="store_true", default=None, help="Принудительно отправить коммит в remote")
+    apply_p.add_argument("--no-push", dest="push", action="store_false", help="Не отправлять коммит в remote")
+
+    subparsers.add_parser("rollback", help="Откатить последний [LLM] коммит")
+    subparsers.add_parser("tree", help="Вывести дерево файлов проекта")
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        init_project(init_git=args.git, remote_url=args.remote)
+    elif args.command == "dump":
+        dump_project(args.output)
+    elif args.command == "apply":
+        apply_patch(args.file, force_push=args.push)
+    elif args.command == "rollback":
+        git_rollback()
+    elif args.command == "tree":
+        print_tree()
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
