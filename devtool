@@ -568,6 +568,10 @@ def git_rollback():
         print("❌ Проект не является Git-репозиторием.")
         return
 
+    ai_dir = root / AI_DIR_NAME
+    config = load_config(ai_dir)
+    branch = get_current_branch(root)
+
     try:
         last_commit = run_git(["log", "-1", "--pretty=%B"], cwd=root).stdout.strip()
         if not last_commit.startswith("[LLM]"):
@@ -576,14 +580,37 @@ def git_rollback():
                 print("Откат отменен.")
                 return
 
+        # Проверяем, успел ли коммит улететь в remote
+        is_pushed = False
+        remotes = run_git(["remote"], check=False, cwd=root).stdout.split()
+        if "origin" in remotes:
+            check_remote = run_git(["merge-base", "--is-ancestor", "HEAD", f"origin/{branch}"], check=False, cwd=root)
+            if check_remote.returncode == 0:
+                is_pushed = True
+
+        # Локальный откат
         run_git(["reset", "--hard", "HEAD~1"], cwd=root)
         run_git(["clean", "-fd"], cwd=root)
-        print(f"✨ Коммит нейросети \"{last_commit}\" удален.")
+        print(f"✨ Локальный коммит нейросети \"{last_commit}\" удален.")
 
+        # Восстановление пользовательского чекпоинта (если был)
         prev_commit = run_git(["log", "-1", "--pretty=%B"], check=False, cwd=root).stdout.strip()
         if prev_commit.startswith(CHECKPOINT_PREFIX):
             run_git(["reset", "HEAD~1"], cwd=root)
             print("🔄 Ваши незакоммиченные файлы возвращены в редактор в исходном виде!")
+
+        # Если коммит был на GitHub, синхронизируем откат
+        if is_pushed:
+            print("\n🌐 Этот коммит уже был отправлен на GitHub.")
+            remote_confirm = input(f"Откатить ветку '{branch}' и на GitHub тоже (force-push)? (y/N): ").strip().lower()
+            if remote_confirm == "y":
+                push_res = run_git(["push", "--force-with-lease", "origin", branch], check=False, cwd=root)
+                if push_res.returncode == 0:
+                    print(f"🚀 Изменения успешно откачены на GitHub (ветка {branch}).")
+                else:
+                    print(f"⚠️  Ошибка force-push: {push_res.stderr.strip()}")
+            else:
+                print("ℹ️  Откат остался только локальным. На GitHub ветка не изменилась.")
 
     except subprocess.CalledProcessError as e:
         print(f"❌ Ошибка Git: {e.stderr}")
