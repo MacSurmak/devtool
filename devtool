@@ -570,10 +570,10 @@ def dump_skeleton(root: Path, out_file: Path, rules: list[str]):
     est_tokens = int(len(header) / 4)
     print(f"✨ Скелет проекта собран: {out_file}")
     print(
-        f"📊 Строк: {total_lines} | Примерный объем: ~{est_tokens:,} токенов (вместо сотен тысяч)"
+        f"📊 Строк: {total_lines} | Примерный объем: ~{est_tokens:,} токенов"
     )
     print(
-        "💡 Отправьте этот файл модели. Когда она запросит конкретные файлы, используйте:"
+        "💡 Для вывода полного содержимого файлов используйте:"
     )
     print("   devtool dump <path1> <path2> ...")
 
