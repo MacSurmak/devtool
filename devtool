@@ -541,9 +541,8 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
             print("\nℹ️  Изменений для коммита нет.")
             return
 
-        full_msg = f"[LLM] {commit_msg}"
-        run_git(["commit", "-m", full_msg], cwd=root)
-        print(f"📦 Сделан коммит: \"{full_msg}\"")
+        run_git(["commit", "-m", commit_msg], cwd=root)
+        print(f"📦 Сделан коммит: \"{commit_msg}\"")
 
         should_push = force_push if force_push is not None else config.get("auto_push", False)
         if should_push:
