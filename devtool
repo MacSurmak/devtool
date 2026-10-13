@@ -574,11 +574,10 @@ def git_rollback():
 
     try:
         last_commit = run_git(["log", "-1", "--pretty=%B"], cwd=root).stdout.strip()
-        if not last_commit.startswith("[LLM]"):
-            confirm = input(f"⚠️  Последний коммит \"{last_commit}\" без префикса [LLM]. Точно откатить? (y/N): ")
-            if confirm.lower() != "y":
-                print("Откат отменен.")
-                return
+        confirm = input(f"⚠️  Откатить последний коммит \"{last_commit}\"? (y/N): ").strip().lower()
+        if confirm != "y":
+            print("Откат отменен.")
+            return
 
         # Проверяем, успел ли коммит улететь в remote
         is_pushed = False
@@ -591,7 +590,7 @@ def git_rollback():
         # Локальный откат
         run_git(["reset", "--hard", "HEAD~1"], cwd=root)
         run_git(["clean", "-fd"], cwd=root)
-        print(f"✨ Локальный коммит нейросети \"{last_commit}\" удален.")
+        print(f"✨ Коммит \"{last_commit}\" удален.")
 
         # Восстановление пользовательского чекпоинта (если был)
         prev_commit = run_git(["log", "-1", "--pretty=%B"], check=False, cwd=root).stdout.strip()
@@ -619,6 +618,30 @@ def git_rollback():
 # ============================================================================
 #                                  DUMP / TREE
 # ============================================================================
+
+def manage_branches(branch_name: str | None = None):
+    root = get_project_root()
+    if not is_git_repo(root):
+        print("❌ Проект не является Git-репозиторием.")
+        return
+
+    if not branch_name:
+        current = get_current_branch(root)
+        branches = run_git(["branch", "--list"], cwd=root).stdout
+        print(f"🌿 Текущая ветка: {current}\n{branches}")
+        return
+
+    # Получаем список локальных веток
+    res = run_git(["branch", "--list"], cwd=root).stdout.splitlines()
+    existing_branches = [b.strip().lstrip("* ") for b in res]
+
+    if branch_name in existing_branches:
+        run_git(["switch", branch_name], cwd=root)
+        print(f"🔀 Переключились на существующую ветку: {branch_name}")
+    else:
+        run_git(["switch", "-c", branch_name], cwd=root)
+        print(f"🌱 Создана новая ветка и выполнен переход: {branch_name}")
+
 
 def is_text_file(p: Path) -> bool:
     if p.suffix.lower() in TEXT_EXTENSIONS or p.name.startswith("."):
@@ -731,7 +754,10 @@ def main():
     apply_p.add_argument("--push", dest="push", action="store_true", default=None, help="Принудительно отправить коммит в remote")
     apply_p.add_argument("--no-push", dest="push", action="store_false", help="Не отправлять коммит в remote")
 
-    subparsers.add_parser("rollback", help="Откатить последний [LLM] коммит")
+    branch_p = subparsers.add_parser("branch", help="Создать ветку или переключиться на нее")
+    branch_p.add_argument("name", nargs="?", help="Имя ветки (без имени покажет список веток)")
+
+    subparsers.add_parser("rollback", help="Откатить последний коммит")
     subparsers.add_parser("tree", help="Вывести дерево файлов проекта")
 
     args = parser.parse_args()
@@ -742,6 +768,8 @@ def main():
         dump_project(args.output)
     elif args.command == "apply":
         apply_patch(args.file, force_push=args.push)
+    elif args.command == "branch":
+        manage_branches(args.name)
     elif args.command == "rollback":
         git_rollback()
     elif args.command == "tree":
