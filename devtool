@@ -465,6 +465,16 @@ def extract_markdown_signatures(content: str) -> list[str]:
     return headers[:15]
 
 
+def extract_bash_signatures(content: str) -> list[str]:
+    sigs = []
+    pattern = re.compile(
+        r"^\s*(function\s+)?([A-Za-z0-9_-]+)\s*\(\)\s*\{", re.MULTILINE
+    )
+    for m in pattern.finditer(content):
+        sigs.append(f"function {m.group(2)}()")
+    return sigs[:20]
+
+
 def extract_file_signatures(path: Path) -> list[str]:
     try:
         content = path.read_text(encoding="utf-8", errors="replace")
@@ -472,18 +482,43 @@ def extract_file_signatures(path: Path) -> list[str]:
         return []
 
     ext = path.suffix.lower()
-    if ext in (".py", ".pyi"):
+    first_line = content.splitlines()[0].strip() if content else ""
+
+    # 1. Python (.py или исполняемый файл без расширения с python shebang)
+    if ext in (".py", ".pyi") or (
+        first_line.startswith("#!") and "python" in first_line
+    ):
         return extract_python_signatures(content)
+
+    # 2. Bash / Shell скрипты (.sh или shebang bash/sh)
+    elif ext in (".sh", ".bash", ".zsh") or (
+        first_line.startswith("#!")
+        and any(sh in first_line for sh in ("bash", "sh", "zsh"))
+    ):
+        return extract_bash_signatures(content)
+
+    # 3. Nextflow
     elif ext == ".nf":
         return extract_nextflow_signatures(content)
-    elif ext in (".js", ".jsx", ".ts", ".tsx"):
+
+    # 4. JS / TS
+    elif ext in (".js", ".jsx", ".ts", ".tsx") or (
+        first_line.startswith("#!") and "node" in first_line
+    ):
         return extract_js_ts_signatures(content)
+
+    # 5. Go / Rust
     elif ext in (".go", ".rs"):
         return extract_go_rust_signatures(content)
+
+    # 6. Конфиги
     elif ext in (".yaml", ".yml", ".json", ".toml"):
         return extract_config_signatures(path, content)
+
+    # 7. Документация
     elif ext in (".md", ".rst"):
         return extract_markdown_signatures(content)
+
     return []
 
 
@@ -569,12 +604,8 @@ def dump_skeleton(root: Path, out_file: Path, rules: list[str]):
     total_lines = len(tree_lines)
     est_tokens = int(len(header) / 4)
     print(f"✨ Скелет проекта собран: {out_file}")
-    print(
-        f"📊 Строк: {total_lines} | Примерный объем: ~{est_tokens:,} токенов"
-    )
-    print(
-        "💡 Для вывода полного содержимого файлов используйте:"
-    )
+    print(f"📊 Строк: {total_lines} | Примерный объем: ~{est_tokens:,} токенов")
+    print("💡 Для вывода полного содержимого файлов используйте:")
     print("   devtool dump <path1> <path2> ...")
 
 
