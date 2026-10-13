@@ -126,17 +126,78 @@ Thumbs.db
 
 # Универсальный список текстовых расширений исходного кода и конфигов
 TEXT_EXTENSIONS = {
-    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".css", ".scss", ".sass", ".less",
-    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".md", ".rst", ".txt",
-    ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".cs", ".java", ".kt", ".kts",
-    ".go", ".rs", ".php", ".rb", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1",
-    ".sql", ".dockerfile", ".env.example", ".gitignore", ".gitattributes", ".ini", ".cfg", ".conf",
-    ".proto", ".graphql", ".gql", ".vue", ".svelte", ".lua", ".zig", ".dart", ".swift", ".scala", ".r", ".m"
+    ".py",
+    ".pyi",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".html",
+    ".htm",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".json",
+    ".jsonc",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".md",
+    ".rst",
+    ".txt",
+    ".c",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".hh",
+    ".hxx",
+    ".cs",
+    ".java",
+    ".kt",
+    ".kts",
+    ".go",
+    ".rs",
+    ".php",
+    ".rb",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".sql",
+    ".dockerfile",
+    ".env.example",
+    ".gitignore",
+    ".gitattributes",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".proto",
+    ".graphql",
+    ".gql",
+    ".vue",
+    ".svelte",
+    ".lua",
+    ".zig",
+    ".dart",
+    ".swift",
+    ".scala",
+    ".r",
+    ".m",
 }
 
 COMMIT_PATTERN = re.compile(r"^<{7}\s*COMMIT\s*\n(.*?)\n>{7}\s*COMMIT", re.DOTALL)
-CREATE_PATTERN = re.compile(r"<{7}\s*CREATE:\s*([^\n\r]+?)\s*\n(.*?)>{7}\s*CREATE", re.DOTALL)
-DELETE_PATTERN = re.compile(r"<{7}\s*DELETE:\s*([^\n\r]+?)\s*\n>{7}\s*DELETE", re.DOTALL)
+CREATE_PATTERN = re.compile(
+    r"<{7}\s*CREATE:\s*([^\n\r]+?)\s*\n(.*?)>{7}\s*CREATE", re.DOTALL
+)
+DELETE_PATTERN = re.compile(
+    r"<{7}\s*DELETE:\s*([^\n\r]+?)\s*\n>{7}\s*DELETE", re.DOTALL
+)
 
 REPLACE_PATTERN = re.compile(
     r"<{7}\s*SEARCH:\s*([^\n\r]+?)\s*\n"
@@ -153,25 +214,35 @@ def run_git(args, check=True, cwd=None):
     if check and res.returncode != 0:
         err = res.stderr.strip() or res.stdout.strip()
         print(f"\n❌ Git error (`git {' '.join(args)}`):\n{err}\n")
-        raise subprocess.CalledProcessError(res.returncode, ["git"] + args, output=res.stdout, stderr=res.stderr)
+        raise subprocess.CalledProcessError(
+            res.returncode, ["git"] + args, output=res.stdout, stderr=res.stderr
+        )
     return res
 
 
 def is_git_repo(root: Path) -> bool:
-    res = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-                         capture_output=True, text=True)
+    res = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
     return res.returncode == 0
 
 
 def get_current_branch(root: Path) -> str:
-    res = subprocess.run(["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
-                         capture_output=True, text=True)
+    res = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
     return res.stdout.strip() if res.returncode == 0 else "main"
 
 
 def get_project_root() -> Path:
     try:
-        res = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        res = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True
+        )
         if res.returncode == 0:
             return Path(res.stdout.strip())
     except Exception:
@@ -182,7 +253,13 @@ def get_project_root() -> Path:
 def get_ai_paths():
     root = get_project_root()
     ai_dir = root / AI_DIR_NAME
-    return root, ai_dir, ai_dir / DEFAULT_DUMP_NAME, ai_dir / DEFAULT_PATCH_NAME, ai_dir / DUMPIGNORE_NAME
+    return (
+        root,
+        ai_dir,
+        ai_dir / DEFAULT_DUMP_NAME,
+        ai_dir / DEFAULT_PATCH_NAME,
+        ai_dir / DUMPIGNORE_NAME,
+    )
 
 
 def resolve_path(p_str: str, root: Path) -> Path:
@@ -202,12 +279,15 @@ def load_config(ai_dir: Path) -> dict:
 
 def save_config(ai_dir: Path, cfg: dict):
     ai_dir.mkdir(parents=True, exist_ok=True)
-    (ai_dir / CONFIG_NAME).write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    (ai_dir / CONFIG_NAME).write_text(
+        json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 # ============================================================================
 #                                DUMPIGNORE
 # ============================================================================
+
 
 def load_dumpignore_rules(dumpignore_path: Path) -> list[str]:
     if not dumpignore_path.exists():
@@ -232,14 +312,22 @@ def should_ignore(rel_path: Path, is_dir: bool, rules: list[str]) -> bool:
         if rule.endswith("/"):
             clean_rule = rule.rstrip("/")
             if is_dir:
-                if fnmatch.fnmatch(name, clean_rule) or fnmatch.fnmatch(path_str, clean_rule) or fnmatch.fnmatch(path_str, f"*/{clean_rule}"):
+                if (
+                    fnmatch.fnmatch(name, clean_rule)
+                    or fnmatch.fnmatch(path_str, clean_rule)
+                    or fnmatch.fnmatch(path_str, f"*/{clean_rule}")
+                ):
                     return True
             else:
                 parts = rel_path.parts[:-1]
                 if any(fnmatch.fnmatch(p, clean_rule) for p in parts):
                     return True
         else:
-            if fnmatch.fnmatch(name, rule) or fnmatch.fnmatch(path_str, rule) or fnmatch.fnmatch(path_str, f"*/{rule}"):
+            if (
+                fnmatch.fnmatch(name, rule)
+                or fnmatch.fnmatch(path_str, rule)
+                or fnmatch.fnmatch(path_str, f"*/{rule}")
+            ):
                 return True
     return False
 
@@ -248,9 +336,12 @@ def should_ignore(rel_path: Path, is_dir: bool, rules: list[str]) -> bool:
 #                       EXACT MATCH & SIMILARITY HELPER
 # ============================================================================
 
+
 def find_closest_match(content: str, search_block: str) -> str | None:
     """Ищет наиболее похожий фрагмент файла с помощью скользящего окна (для диагностики)."""
-    target_lines = [line.strip() for line in search_block.strip().splitlines() if line.strip()]
+    target_lines = [
+        line.strip() for line in search_block.strip().splitlines() if line.strip()
+    ]
     if not target_lines:
         return None
 
@@ -259,7 +350,9 @@ def find_closest_match(content: str, search_block: str) -> str | None:
     target_len = len(target_lines)
 
     if len(content_lines) <= target_len:
-        ratio = difflib.SequenceMatcher(None, target_lines, content_lines_stripped).ratio()
+        ratio = difflib.SequenceMatcher(
+            None, target_lines, content_lines_stripped
+        ).ratio()
         return content if ratio >= 0.4 else None
 
     best_ratio = 0.0
@@ -270,29 +363,36 @@ def find_closest_match(content: str, search_block: str) -> str | None:
 
     for win in range(min_win, max_win + 1):
         for i in range(len(content_lines) - win + 1):
-            chunk = content_lines_stripped[i:i + win]
+            chunk = content_lines_stripped[i : i + win]
             ratio = difflib.SequenceMatcher(None, target_lines, chunk).ratio()
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_slice = (i, i + win)
 
     if best_ratio >= 0.45 and best_slice:
-        return "\n".join(content_lines[best_slice[0]:best_slice[1]])
+        return "\n".join(content_lines[best_slice[0] : best_slice[1]])
     return None
 
 
-def exact_find_and_replace(content: str, search_block: str, replace_block: str) -> tuple[str, bool, str]:
+def exact_find_and_replace(
+    content: str, search_block: str, replace_block: str
+) -> tuple[str, bool, str]:
     if search_block not in content:
         return content, False, "Точный блок SEARCH не найден в файле."
     count = content.count(search_block)
     if count > 1:
-        return content, False, f"Точный блок встречается в файле {count} раз(а). Необходим более уникальный контекст."
+        return (
+            content,
+            False,
+            f"Точный блок встречается в файле {count} раз(а). Необходим более уникальный контекст.",
+        )
     return content.replace(search_block, replace_block, 1), True, "100% совпадение"
 
 
 # ============================================================================
 #                                   INIT
 # ============================================================================
+
 
 def init_project(init_git: bool = False, remote_url: str | None = None):
     root = Path.cwd()
@@ -349,7 +449,10 @@ def init_project(init_git: bool = False, remote_url: str | None = None):
 
     patch_file = ai_dir / DEFAULT_PATCH_NAME
     if not patch_file.exists():
-        patch_file.write_text("# Вставьте ответ нейросети сюда и запустите: devtool apply\n", encoding="utf-8")
+        patch_file.write_text(
+            "# Вставьте ответ нейросети сюда и запустите: devtool apply\n",
+            encoding="utf-8",
+        )
 
     dumpignore_file = ai_dir / DUMPIGNORE_NAME
     if not dumpignore_file.exists():
@@ -358,12 +461,15 @@ def init_project(init_git: bool = False, remote_url: str | None = None):
 
     print("✨ Готово!")
     if has_git and remote_url:
-        print(f"🌐 Remote настроен на ветку {get_current_branch(root)}. Изменения будут пушиться при `devtool apply`.")
+        print(
+            f"🌐 Remote настроен на ветку {get_current_branch(root)}. Изменения будут пушиться при `devtool apply`."
+        )
 
 
 # ============================================================================
 #                                   APPLY
 # ============================================================================
+
 
 def apply_patch(patch_path=None, force_push: bool | None = None):
     root, ai_dir, _, default_patch, _ = get_ai_paths()
@@ -385,7 +491,9 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
     first_chunk = patch_text[first_block_idx:]
     commit_match = COMMIT_PATTERN.match(first_chunk)
     if not commit_match:
-        print("❌ Первым блоком ОБЯЗАТЕЛЬНО должен быть <<<<<<< COMMIT ... >>>>>>> COMMIT")
+        print(
+            "❌ Первым блоком ОБЯЗАТЕЛЬНО должен быть <<<<<<< COMMIT ... >>>>>>> COMMIT"
+        )
         return
 
     commit_msg = commit_match.group(1).strip()
@@ -441,7 +549,9 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
             file_sim_content[f] = target.read_text(encoding="utf-8")
 
         current_content = file_sim_content[f]
-        new_content, ok, reason = exact_find_and_replace(current_content, search_b, replace_b)
+        new_content, ok, reason = exact_find_and_replace(
+            current_content, search_b, replace_b
+        )
         if ok:
             file_sim_content[f] = new_content
             valid_replaces.append((f, search_b, replace_b))
@@ -477,7 +587,13 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
             return
 
         print(f"\n⚠️  Готово к применению: {success_ops}, с ошибками: {failed_ops}.")
-        confirm = input("Применить только совпавшие операции? Несовпавшие останутся в patch-файле (y/N): ").strip().lower()
+        confirm = (
+            input(
+                "Применить только совпавшие операции? Несовпавшие останутся в patch-файле (y/N): "
+            )
+            .strip()
+            .lower()
+        )
         if confirm != "y":
             print("🛑 Применение отменено пользователем.")
             return
@@ -489,7 +605,10 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
         if res.stdout.strip():
             print("💾 Обнаружены ваши ручные правки. Сохраняю чекпоинт...")
             run_git(["add", "-A"], cwd=root)
-            run_git(["commit", "-m", f"{CHECKPOINT_PREFIX} Uncommitted user edits"], cwd=root)
+            run_git(
+                ["commit", "-m", f"{CHECKPOINT_PREFIX} Uncommitted user edits"],
+                cwd=root,
+            )
             created_checkpoint = True
 
     touched_files = set()
@@ -525,13 +644,18 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
         for f, content in failed_creates:
             remaining_patch.append(f"<<<<<<< CREATE: {f}\n{content}>>>>>>> CREATE\n")
         for f, sb, rb, _, _ in failed_replaces:
-            remaining_patch.append(f"<<<<<<< SEARCH: {f}\n{sb}\n=======\n{rb}\n>>>>>>> REPLACE\n")
+            remaining_patch.append(
+                f"<<<<<<< SEARCH: {f}\n{sb}\n=======\n{rb}\n>>>>>>> REPLACE\n"
+            )
 
         target_file.write_text("\n".join(remaining_patch), encoding="utf-8")
         print(f"\n📋 Непримененные блоки сохранены в: {target_file}")
     else:
         if not patch_path and default_patch.exists():
-            default_patch.write_text("# Вставьте ответ нейросети сюда и запустите: devtool apply\n", encoding="utf-8")
+            default_patch.write_text(
+                "# Вставьте ответ нейросети сюда и запустите: devtool apply\n",
+                encoding="utf-8",
+            )
 
     # ------------------ GIT COMMIT & REMOTE PUSH ------------------
     if has_git:
@@ -542,9 +666,11 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
             return
 
         run_git(["commit", "-m", commit_msg], cwd=root)
-        print(f"📦 Сделан коммит: \"{commit_msg}\"")
+        print(f'📦 Сделан коммит: "{commit_msg}"')
 
-        should_push = force_push if force_push is not None else config.get("auto_push", False)
+        should_push = (
+            force_push if force_push is not None else config.get("auto_push", False)
+        )
         if should_push:
             branch = get_current_branch(root)
             print(f"🚀 Отправка изменений в remote (ветка {branch})...")
@@ -552,7 +678,9 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
             if push_res.returncode == 0:
                 print("✅ Изменения успешно отправлены на GitHub/remote!")
             else:
-                print(f"⚠️  Не удалось выполнить push: {push_res.stderr.strip() or push_res.stdout.strip()}")
+                print(
+                    f"⚠️  Не удалось выполнить push: {push_res.stderr.strip() or push_res.stdout.strip()}"
+                )
     else:
         print("✅ Все совпавшие файлы обновлены на диске (без Git).")
 
@@ -560,6 +688,7 @@ def apply_patch(patch_path=None, force_push: bool | None = None):
 # ============================================================================
 #                                   ROLLBACK
 # ============================================================================
+
 
 def git_rollback():
     root = get_project_root()
@@ -573,7 +702,11 @@ def git_rollback():
 
     try:
         last_commit = run_git(["log", "-1", "--pretty=%B"], cwd=root).stdout.strip()
-        confirm = input(f"⚠️  Откатить последний коммит \"{last_commit}\"? (y/N): ").strip().lower()
+        confirm = (
+            input(f'⚠️  Откатить последний коммит "{last_commit}"? (y/N): ')
+            .strip()
+            .lower()
+        )
         if confirm != "y":
             print("Откат отменен.")
             return
@@ -582,33 +715,53 @@ def git_rollback():
         is_pushed = False
         remotes = run_git(["remote"], check=False, cwd=root).stdout.split()
         if "origin" in remotes:
-            check_remote = run_git(["merge-base", "--is-ancestor", "HEAD", f"origin/{branch}"], check=False, cwd=root)
+            check_remote = run_git(
+                ["merge-base", "--is-ancestor", "HEAD", f"origin/{branch}"],
+                check=False,
+                cwd=root,
+            )
             if check_remote.returncode == 0:
                 is_pushed = True
 
         # Локальный откат
         run_git(["reset", "--hard", "HEAD~1"], cwd=root)
         run_git(["clean", "-fd"], cwd=root)
-        print(f"✨ Коммит \"{last_commit}\" удален.")
+        print(f'✨ Коммит "{last_commit}" удален.')
 
         # Восстановление пользовательского чекпоинта (если был)
-        prev_commit = run_git(["log", "-1", "--pretty=%B"], check=False, cwd=root).stdout.strip()
+        prev_commit = run_git(
+            ["log", "-1", "--pretty=%B"], check=False, cwd=root
+        ).stdout.strip()
         if prev_commit.startswith(CHECKPOINT_PREFIX):
             run_git(["reset", "HEAD~1"], cwd=root)
-            print("🔄 Ваши незакоммиченные файлы возвращены в редактор в исходном виде!")
+            print(
+                "🔄 Ваши незакоммиченные файлы возвращены в редактор в исходном виде!"
+            )
 
         # Если коммит был на GitHub, синхронизируем откат
         if is_pushed:
             print("\n🌐 Этот коммит уже был отправлен на GitHub.")
-            remote_confirm = input(f"Откатить ветку '{branch}' и на GitHub тоже (force-push)? (y/N): ").strip().lower()
+            remote_confirm = (
+                input(
+                    f"Откатить ветку '{branch}' и на GitHub тоже (force-push)? (y/N): "
+                )
+                .strip()
+                .lower()
+            )
             if remote_confirm == "y":
-                push_res = run_git(["push", "--force-with-lease", "origin", branch], check=False, cwd=root)
+                push_res = run_git(
+                    ["push", "--force-with-lease", "origin", branch],
+                    check=False,
+                    cwd=root,
+                )
                 if push_res.returncode == 0:
                     print(f"🚀 Изменения успешно откачены на GitHub (ветка {branch}).")
                 else:
                     print(f"⚠️  Ошибка force-push: {push_res.stderr.strip()}")
             else:
-                print("ℹ️  Откат остался только локальным. На GitHub ветка не изменилась.")
+                print(
+                    "ℹ️  Откат остался только локальным. На GitHub ветка не изменилась."
+                )
 
     except subprocess.CalledProcessError as e:
         print(f"❌ Ошибка Git: {e.stderr}")
@@ -617,6 +770,7 @@ def git_rollback():
 # ============================================================================
 #                                  DUMP / TREE
 # ============================================================================
+
 
 def manage_branches(branch_name: str | None = None):
     root = get_project_root()
@@ -653,10 +807,14 @@ def is_text_file(p: Path) -> bool:
         return False
 
 
-def build_tree(dir_path: Path, root_path: Path, rules: list[str] | None = None, prefix: str = "") -> list:
+def build_tree(
+    dir_path: Path, root_path: Path, rules: list[str] | None = None, prefix: str = ""
+) -> list:
     tree = []
     try:
-        entries = sorted(list(dir_path.iterdir()), key=lambda x: (x.is_file(), x.name.lower()))
+        entries = sorted(
+            list(dir_path.iterdir()), key=lambda x: (x.is_file(), x.name.lower())
+        )
     except (PermissionError, OSError):
         return [prefix + "└── [Доступ запрещен]"]
 
@@ -709,8 +867,11 @@ def dump_project(output_path=None):
         for r, dirs, files in os.walk(root):
             rel_root = Path(r).relative_to(root)
             dirs[:] = [
-                d for d in dirs
-                if not should_ignore(rel_root / d if str(rel_root) != "." else Path(d), True, rules)
+                d
+                for d in dirs
+                if not should_ignore(
+                    rel_root / d if str(rel_root) != "." else Path(d), True, rules
+                )
             ]
 
             for file in files:
@@ -737,24 +898,50 @@ def dump_project(output_path=None):
 #                                     CLI
 # ============================================================================
 
+
 def main():
-    parser = argparse.ArgumentParser(prog="devtool", description="AI DevTool - локальный инструмент интеграции с LLM")
+    parser = argparse.ArgumentParser(
+        prog="devtool", description="AI DevTool - локальный инструмент интеграции с LLM"
+    )
     subparsers = parser.add_subparsers(dest="command")
 
-    init_p = subparsers.add_parser("init", help="Инициализировать AI окружение в проекте")
-    init_p.add_argument("--git", action="store_true", help="Создать локальный Git-репозиторий")
-    init_p.add_argument("--remote", help="URL GitHub/GitLab репозитория (включает Git и авто-пуш)")
+    init_p = subparsers.add_parser(
+        "init", help="Инициализировать AI окружение в проекте"
+    )
+    init_p.add_argument(
+        "--git", action="store_true", help="Создать локальный Git-репозиторий"
+    )
+    init_p.add_argument(
+        "--remote", help="URL GitHub/GitLab репозитория (включает Git и авто-пуш)"
+    )
 
     dump_p = subparsers.add_parser("dump", help="Собрать контекст проекта для LLM")
     dump_p.add_argument("-o", "--output", help="Путь к файлу дампа")
 
     apply_p = subparsers.add_parser("apply", help="Применить патч от LLM")
-    apply_p.add_argument("file", nargs="?", help="Путь к файлу патча (по умолчанию .ai/patch.txt)")
-    apply_p.add_argument("--push", dest="push", action="store_true", default=None, help="Принудительно отправить коммит в remote")
-    apply_p.add_argument("--no-push", dest="push", action="store_false", help="Не отправлять коммит в remote")
+    apply_p.add_argument(
+        "file", nargs="?", help="Путь к файлу патча (по умолчанию .ai/patch.txt)"
+    )
+    apply_p.add_argument(
+        "--push",
+        dest="push",
+        action="store_true",
+        default=None,
+        help="Принудительно отправить коммит в remote",
+    )
+    apply_p.add_argument(
+        "--no-push",
+        dest="push",
+        action="store_false",
+        help="Не отправлять коммит в remote",
+    )
 
-    branch_p = subparsers.add_parser("branch", help="Создать ветку или переключиться на нее")
-    branch_p.add_argument("name", nargs="?", help="Имя ветки (без имени покажет список веток)")
+    branch_p = subparsers.add_parser(
+        "branch", help="Создать ветку или переключиться на нее"
+    )
+    branch_p.add_argument(
+        "name", nargs="?", help="Имя ветки (без имени покажет список веток)"
+    )
 
     subparsers.add_parser("rollback", help="Откатить последний коммит")
     subparsers.add_parser("tree", help="Вывести дерево файлов проекта")
