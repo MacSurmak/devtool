@@ -563,12 +563,43 @@ def build_skeleton_tree(
     return tree
 
 
-def print_tree():
-    root = get_project_root()
-    print(f"{root.name}/")
-    lines = build_skeleton_tree(root, root, rules=None)
-    if lines:
-        print("\n".join(lines))
+def export_tree(
+    target: str = ".", output_path: str | None = None, to_stdout: bool = False
+):
+    root, ai_dir, default_dump, _, dumpignore_file = get_ai_paths()
+    rules = load_dumpignore_rules(dumpignore_file)
+
+    target_dir = resolve_path(target, root)
+    if not target_dir.exists():
+        print(f"❌ Путь не найден: {target}")
+        return
+
+    tree_lines = build_skeleton_tree(target_dir, root, rules=rules)
+    scope_name = (
+        root.name
+        if target_dir == root
+        else f"{root.name}/{target_dir.relative_to(root)}"
+    )
+
+    tree_text = (
+        "================================================\n"
+        f" СТРУКТУРА: {scope_name}\n"
+        "================================================\n\n"
+        f"{scope_name}/\n" + "\n".join(tree_lines) + "\n"
+    )
+
+    if to_stdout:
+        print(tree_text)
+        return
+
+    out_file = Path(output_path) if output_path else default_dump
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(tree_text, encoding="utf-8")
+
+    total_lines = len(tree_lines)
+    est_tokens = int(len(tree_text) / 4)
+    print(f"✅ Дерево проекта сохранено в: {out_file}")
+    print(f"📊 Строк: {total_lines} | Примерный объем: ~{est_tokens:,} токенов")
 
 
 # ============================================================================
@@ -1216,8 +1247,23 @@ def main():
         help="Файл или папка (по умолчанию весь проект '.')",
     )
 
+    tree_p = subparsers.add_parser(
+        "tree", help="Собрать дерево файлов со скелетом в файл дампа"
+    )
+    tree_p.add_argument(
+        "target",
+        nargs="?",
+        default=".",
+        help="Папка для дерева (по умолчанию весь проект '.')",
+    )
+    tree_p.add_argument(
+        "-o", "--output", help="Путь к файлу вывода (по умолчанию .ai/dump.txt)"
+    )
+    tree_p.add_argument(
+        "--stdout", action="store_true", help="Вывести дерево в консоль вместо файла"
+    )
+
     subparsers.add_parser("rollback", help="Откатить последний коммит")
-    subparsers.add_parser("tree", help="Вывести дерево файлов проекта")
 
     args = parser.parse_args()
 
@@ -1234,7 +1280,9 @@ def main():
     elif args.command == "rollback":
         git_rollback()
     elif args.command == "tree":
-        print_tree()
+        export_tree(
+            target=args.target, output_path=args.output, to_stdout=args.stdout
+        )
     else:
         parser.print_help()
 
