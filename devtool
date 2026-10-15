@@ -114,12 +114,71 @@ Thumbs.db
 """
 
 TEXT_EXTENSIONS = {
-    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".html", ".htm", ".css", ".scss", ".sass", ".less",
-    ".json", ".jsonc", ".yaml", ".yml", ".toml", ".xml", ".md", ".rst", ".txt",
-    ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx", ".cs", ".java", ".kt", ".kts",
-    ".go", ".rs", ".php", ".rb", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1",
-    ".sql", ".dockerfile", ".env.example", ".gitignore", ".gitattributes", ".ini", ".cfg", ".conf",
-    ".proto", ".graphql", ".gql", ".vue", ".svelte", ".lua", ".zig", ".dart", ".swift", ".scala", ".r", ".m", ".nf", ".config",
+    ".py",
+    ".pyi",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".html",
+    ".htm",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".json",
+    ".jsonc",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".md",
+    ".rst",
+    ".txt",
+    ".c",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".h",
+    ".hpp",
+    ".hh",
+    ".hxx",
+    ".cs",
+    ".java",
+    ".kt",
+    ".kts",
+    ".go",
+    ".rs",
+    ".php",
+    ".rb",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".sql",
+    ".dockerfile",
+    ".env.example",
+    ".gitignore",
+    ".gitattributes",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".proto",
+    ".graphql",
+    ".gql",
+    ".vue",
+    ".svelte",
+    ".lua",
+    ".zig",
+    ".dart",
+    ".swift",
+    ".scala",
+    ".r",
+    ".m",
+    ".nf",
+    ".config",
 }
 
 COMMIT_PATTERN = re.compile(r"^<{7}\s*COMMIT\s*\n(.*?)\n>{7}\s*COMMIT", re.DOTALL)
@@ -544,7 +603,7 @@ def dump_targeted(
     for t_str in target_paths:
         if t_str == ".":
             t_str = "*"
-            
+
         target = resolve_path(t_str, root)
         if not target.exists():
             matched = list(root.glob(t_str))
@@ -730,13 +789,17 @@ def apply_patch(patch_path=None, force_push: bool = False):
         if status_res.stdout.strip():
             print("\n⚠️  В репозитории есть ваши незакоммиченные файлы:\n")
             print(run_git(["status", "-s"], cwd=root).stdout)
-            user_msg = input("📝 Введите сообщение коммита для ваших правок (или Enter для отмены): ").strip()
+            user_msg = input(
+                "📝 Введите сообщение коммита для ваших правок (или Enter для отмены): "
+            ).strip()
             if not user_msg:
-                print("🛑 Применение отменено. Закоммитьте изменения (`git commit`) или спрячьте (`git stash`), затем повторите devtool apply.")
+                print(
+                    "🛑 Применение отменено. Закоммитьте изменения (`git commit`) или спрячьте (`git stash`), затем повторите devtool apply."
+                )
                 return
             run_git(["add", "-A"], cwd=root)
             run_git(["commit", "-m", user_msg], cwd=root)
-            print(f"📦 Ваши файлы сохранены в коммит: \"{user_msg}\"\n")
+            print(f'📦 Ваши файлы сохранены в коммит: "{user_msg}"\n')
 
     target_file = Path(patch_path) if patch_path else default_patch
     if not target_file.exists():
@@ -996,7 +1059,9 @@ def run_black(target: str):
         status_res = run_git(["status", "--porcelain"], cwd=root)
         if status_res.stdout.strip():
             print("⚠️  У вас есть незакоммиченные изменения!")
-            print("Сначала закоммитьте их, чтобы не смешивать автоформатирование с вашим кодом.")
+            print(
+                "Сначала закоммитьте их, чтобы не смешивать автоформатирование с вашим кодом."
+            )
             return
 
     print(f"🎨 Запуск Black для: {target}")
@@ -1018,7 +1083,7 @@ def run_black(target: str):
         msg = "style: apply Black code formatter"
         run_git(["add", "-A"], cwd=root)
         run_git(["commit", "-m", msg], cwd=root)
-        print(f"📦 Сделан коммит: \"{msg}\"")
+        print(f'📦 Сделан коммит: "{msg}"')
 
 
 def init_project(init_git: bool = False, remote_url: str | None = None):
@@ -1092,9 +1157,7 @@ def main():
     init_p.add_argument(
         "--git", action="store_true", help="Создать локальный Git-репозиторий"
     )
-    init_p.add_argument(
-        "--remote", help="URL GitHub/GitLab репозитория"
-    )
+    init_p.add_argument("--remote", help="URL GitHub/GitLab репозитория")
 
     dump_p = subparsers.add_parser("dump", help="Собрать контекст проекта для LLM")
     dump_p.add_argument(
@@ -1128,8 +1191,15 @@ def main():
         "name", nargs="?", help="Имя ветки (без имени покажет список веток)"
     )
 
-    black_p = subparsers.add_parser("black", help="Отформатировать код через Black и закоммитить")
-    black_p.add_argument("target", nargs="?", default=".", help="Файл или папка (по умолчанию весь проект '.')")
+    black_p = subparsers.add_parser(
+        "black", help="Отформатировать код через Black и закоммитить"
+    )
+    black_p.add_argument(
+        "target",
+        nargs="?",
+        default=".",
+        help="Файл или папка (по умолчанию весь проект '.')",
+    )
 
     subparsers.add_parser("rollback", help="Откатить последний коммит")
     subparsers.add_parser("tree", help="Вывести дерево файлов проекта")
