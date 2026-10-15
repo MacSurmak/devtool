@@ -15,7 +15,7 @@ DEFAULT_DUMP_NAME = "dump.txt"
 DEFAULT_PATCH_NAME = "patch.txt"
 DUMPIGNORE_NAME = "dumpignore"
 CONFIG_NAME = "config.json"
-CHECKPOINT_PREFIX = "[USER-CHECKPOINT]"
+
 
 DEFAULT_GITIGNORE_TEMPLATE = """# Dependencies & Virtual Environments
 node_modules/
