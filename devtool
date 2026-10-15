@@ -189,11 +189,11 @@ DELETE_PATTERN = re.compile(
     r"<{7}\s*DELETE:\s*([^\n\r]+?)\s*\n>{7}\s*DELETE", re.DOTALL
 )
 REPLACE_PATTERN = re.compile(
-    r"<{7}\s*SEARCH:\s*([^\n\r]+?)\s*\n"
-    r"((?:(?!<{7}|={7}|>{7}).)*?)"
+    r"^<{7}\s*SEARCH:\s*([^\n\r]+?)\s*\n"
+    r"((?:(?!\n<{7}|\n={7}[ \t]*\n|\n>{7}).)*?)"
     r"\n={7}[ \t]*\n"
-    r"((?:(?!<{7}|>{7}).)*?)"
-    r"(?:\n|^)>{7}[ \t]*REPLACE",
+    r"((?:(?!\n<{7}|\n>{7}).)*?)"
+    r"\n>{7}[ \t]*REPLACE",
     re.DOTALL | re.MULTILINE,
 )
 
