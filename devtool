@@ -651,21 +651,24 @@ def dump_targeted(
         "================================================\n"
         f" TARGETED DUMP: {len(sorted_files)} file(s)\n"
         "================================================\n\n"
+        "```devtool\n"
         "<<<<<<< COMMIT\n"
-        f"Update {len(sorted_files)} file(s)\n"
-        ">>>>>>> COMMIT\n\n"
+        f"Unroll {len(sorted_files)} file(s)\n"
+        ">>>>>>> COMMIT\n"
     ]
 
     for fp in sorted_files:
         rel = fp.relative_to(root)
         try:
             content = fp.read_text(encoding="utf-8", errors="replace")
-            out_lines.append(f"<<<<<<< CREATE: {rel}\n{content}")
+            out_lines.append(f"\n<<<<<<< CREATE: {rel}\n{content}")
             if not content.endswith("\n"):
                 out_lines.append("\n")
-            out_lines.append(">>>>>>> CREATE\n\n")
+            out_lines.append(">>>>>>> CREATE\n")
         except Exception as e:
             print(f"⚠️  Ошибка чтения {fp}: {e}")
+
+    out_lines.append("```")
 
     result_text = "".join(out_lines)
     out_file.parent.mkdir(parents=True, exist_ok=True)
