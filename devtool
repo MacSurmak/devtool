@@ -600,35 +600,47 @@ def dump_targeted(
 ):
     matched_files = set()
 
+    def collect_dir(d_path: Path):
+        for r, dirs, files in os.walk(d_path):
+            rel_root = Path(r).relative_to(root)
+            dirs[:] = [
+                d
+                for d in dirs
+                if not should_ignore(
+                    rel_root / d if str(rel_root) != "." else Path(d), True, rules
+                )
+            ]
+            for file in files:
+                fp = Path(r) / file
+                rel = fp.relative_to(root)
+                if not should_ignore(rel, False, rules) and is_text_file(fp):
+                    matched_files.add(fp)
+
     for t_str in target_paths:
         if t_str == ".":
-            t_str = "*"
-
-        target = resolve_path(t_str, root)
-        if not target.exists():
-            matched = list(root.glob(t_str))
-            if matched:
-                for m in matched:
-                    if m.is_file() and is_text_file(m):
-                        matched_files.add(m)
-                    elif m.is_dir():
-                        for sub in m.rglob("*"):
-                            if sub.is_file() and is_text_file(sub):
-                                matched_files.add(sub)
-            else:
-                print(f"⚠️  Путь не найден: {t_str}")
+            collect_dir(root)
             continue
 
-        if target.is_file():
-            if is_text_file(target):
-                matched_files.add(target)
-        elif target.is_dir():
-            for sub in target.rglob("*"):
-                rel = sub.relative_to(root)
-                if should_ignore(rel, False, rules):
-                    continue
-                if sub.is_file() and is_text_file(sub):
-                    matched_files.add(sub)
+        target = resolve_path(t_str, root)
+        if target.exists():
+            if target.is_file():
+                rel = target.relative_to(root)
+                if not should_ignore(rel, False, rules) and is_text_file(target):
+                    matched_files.add(target)
+            elif target.is_dir():
+                collect_dir(target)
+        else:
+            matched = list(root.glob(t_str))
+            if not matched:
+                print(f"⚠️  Путь не найден: {t_str}")
+                continue
+            for m in matched:
+                if m.is_file():
+                    rel = m.relative_to(root)
+                    if not should_ignore(rel, False, rules) and is_text_file(m):
+                        matched_files.add(m)
+                elif m.is_dir():
+                    collect_dir(m)
 
     if not matched_files:
         print("❌ Не найдено текстовых файлов по указанным путям.")
