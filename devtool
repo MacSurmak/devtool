@@ -930,54 +930,85 @@ def apply_patch(patch_path=None, force_push: bool = False):
             print(f"  ❌ REPLACE: {f} ({reason})")
 
     print("─" * 60)
-    failed_ops = len(failed_deletes) + len(failed_creates) + len(failed_replaces)
-    success_ops = (len(deletes) + len(creates) + len(replaces)) - failed_ops
 
     if failed_replaces:
-        print("\n⚠️  Детали ошибок в блоках SEARCH:")
+        print("\n🔎 Интерактивный разбор несовпавших блоков SEARCH:")
+        still_failed_replaces = []
+
         for idx, (f, sb, rb, reason, match_info) in enumerate(failed_replaces, 1):
-            print(f"\n[{idx}] Файл: {f}\n    Причина: {reason}")
-            if match_info:
-                closest_text, ratio = match_info
-                percent = round(ratio * 100, 1)
-                print(f"    📊 Схожесть с найденным блоком: {percent}%")
-                print("    💡 Diff (красный [-] — ожидал SEARCH, зеленый [+] — фактически в файле):")
-                print("    " + "-" * 55)
-                diff_lines = list(
-                    difflib.unified_diff(
-                        sb.splitlines(),
-                        closest_text.splitlines(),
-                        fromfile="SEARCH (от LLM)",
-                        tofile=f"ACTUAL ({f})",
-                        lineterm="",
-                    )
+            print(f"\n[{idx}/{len(failed_replaces)}] Файл: {f}")
+            print(f"    Причина: {reason}")
+
+            if not match_info:
+                print("    ❌ Похожий блок в файле не обнаружен.")
+                still_failed_replaces.append((f, sb, rb, reason, None))
+                continue
+
+            closest_text, ratio = match_info
+            percent = round(ratio * 100, 1)
+            print(f"    📊 Схожесть с найденным блоком: {percent}%")
+            print("    💡 Diff (красный [-] — ожидал SEARCH, зеленый [+] — фактически в файле):")
+            print("    " + "-" * 55)
+            diff_lines = list(
+                difflib.unified_diff(
+                    sb.splitlines(),
+                    closest_text.splitlines(),
+                    fromfile="SEARCH (от LLM)",
+                    tofile=f"ACTUAL ({f})",
+                    lineterm="",
                 )
-                for line in diff_lines:
-                    if line.startswith("---") or line.startswith("+++"):
-                        print(f"    \033[1m{line}\033[0m")
-                    elif line.startswith("-"):
-                        print(f"    \033[91m{line}\033[0m")
-                    elif line.startswith("+"):
-                        print(f"    \033[92m{line}\033[0m")
-                    elif line.startswith("@@"):
-                        print(f"    \033[96m{line}\033[0m")
-                    else:
-                        print(f"    {line}")
-                print("    " + "-" * 55)
+            )
+            for line in diff_lines:
+                if line.startswith("---") or line.startswith("+++"):
+                    print(f"    \033[1m{line}\033[0m")
+                elif line.startswith("-"):
+                    print(f"    \033[91m{line}\033[0m")
+                elif line.startswith("+"):
+                    print(f"    \033[92m{line}\033[0m")
+                elif line.startswith("@@"):
+                    print(f"    \033[96m{line}\033[0m")
+                else:
+                    print(f"    {line}")
+            print("    " + "-" * 55)
+
+            prompt = (
+                input("    👉 Заменить этот найденный блок на REPLACE? (y/N/q): ")
+                .strip()
+                .lower()
+            )
+            if prompt == "q":
+                still_failed_replaces.extend(failed_replaces[idx - 1 :])
+                break
+            elif prompt == "y":
+                curr_content = file_sim_content[f]
+                if closest_text in curr_content and curr_content.count(closest_text) == 1:
+                    file_sim_content[f] = curr_content.replace(closest_text, rb, 1)
+                    valid_replaces.append((f, closest_text, rb))
+                    print("    ✅ Замена успешно принята вручную!")
+                else:
+                    print("    ⚠️  Не удалось применить: фрагмент не уникален в текущем файле.")
+                    still_failed_replaces.append((f, sb, rb, reason, match_info))
+            else:
+                still_failed_replaces.append((f, sb, rb, reason, match_info))
+
+        failed_replaces = still_failed_replaces
+
+    failed_ops = len(failed_deletes) + len(failed_creates) + len(failed_replaces)
+    success_ops = len(valid_deletes) + len(valid_creates) + len(valid_replaces)
 
     if failed_ops > 0:
         if success_ops == 0:
-            print("\n🛑 Все операции завершились ошибкой. Патч не может быть применен.")
+            print("\n🛑 Все операции отклонены или завершились ошибкой. Патч не применен.")
             return
         confirm = (
             input(
-                f"\n⚠️ Готово к применению: {success_ops}, с ошибками: {failed_ops}. Применить только совпавшие? (y/N): "
+                f"\n⚠️  Готово к записи: {success_ops}, осталось отклоненных: {failed_ops}. Записать принятые изменения на диск? (Y/n): "
             )
             .strip()
             .lower()
         )
-        if confirm != "y":
-            print("🛑 Применение отменено.")
+        if confirm == "n":
+            print("🛑 Применение отменено пользователем.")
             return
 
     for f in valid_deletes:
