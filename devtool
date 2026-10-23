@@ -810,9 +810,7 @@ def export_diff(
             print(f"  {line}")
 
 
-def dump_project(
-    output_path=None, targets=None, full_dump=False, since_commit=None
-):
+def dump_project(output_path=None, targets=None, full_dump=False, since_commit=None):
     root, ai_dir, default_dump, _, dumpignore_file = get_ai_paths()
     ai_dir.mkdir(exist_ok=True)
     out_file = Path(output_path) if output_path else default_dump
@@ -1024,7 +1022,9 @@ def apply_patch(patch_path=None, force_push: bool = False):
             closest_text, ratio = match_info
             percent = round(ratio * 100, 1)
             print(f"    📊 Схожесть с найденным блоком: {percent}%")
-            print("    💡 Diff (красный [-] — ожидал SEARCH, зеленый [+] — фактически в файле):")
+            print(
+                "    💡 Diff (красный [-] — ожидал SEARCH, зеленый [+] — фактически в файле):"
+            )
             print("    " + "-" * 55)
             diff_lines = list(
                 difflib.unified_diff(
@@ -1058,12 +1058,17 @@ def apply_patch(patch_path=None, force_push: bool = False):
                 break
             elif prompt == "y":
                 curr_content = file_sim_content[f]
-                if closest_text in curr_content and curr_content.count(closest_text) == 1:
+                if (
+                    closest_text in curr_content
+                    and curr_content.count(closest_text) == 1
+                ):
                     file_sim_content[f] = curr_content.replace(closest_text, rb, 1)
                     valid_replaces.append((f, closest_text, rb))
                     print("    ✅ Замена успешно принята вручную!")
                 else:
-                    print("    ⚠️  Не удалось применить: фрагмент не уникален в текущем файле.")
+                    print(
+                        "    ⚠️  Не удалось применить: фрагмент не уникален в текущем файле."
+                    )
                     still_failed_replaces.append((f, sb, rb, reason, match_info))
             else:
                 still_failed_replaces.append((f, sb, rb, reason, match_info))
@@ -1075,7 +1080,9 @@ def apply_patch(patch_path=None, force_push: bool = False):
 
     if failed_ops > 0:
         if success_ops == 0:
-            print("\n🛑 Все операции отклонены или завершились ошибкой. Патч не применен.")
+            print(
+                "\n🛑 Все операции отклонены или завершились ошибкой. Патч не применен."
+            )
             return
         confirm = (
             input(
@@ -1440,9 +1447,7 @@ def main():
     elif args.command == "rollback":
         git_rollback()
     elif args.command == "tree":
-        export_tree(
-            target=args.target, output_path=args.output, to_stdout=args.stdout
-        )
+        export_tree(target=args.target, output_path=args.output, to_stdout=args.stdout)
     else:
         parser.print_help()
 
