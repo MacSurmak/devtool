@@ -13,6 +13,7 @@ from pathlib import Path
 AI_DIR_NAME = ".ai"
 DEFAULT_DUMP_NAME = "dump.txt"
 DEFAULT_PATCH_NAME = "patch.txt"
+DEFAULT_DIFF_NAME = "diff.txt"
 DUMPIGNORE_NAME = "dumpignore"
 CONFIG_NAME = "config.json"
 
@@ -183,7 +184,10 @@ TEXT_EXTENSIONS = {
 
 COMMIT_PATTERN = re.compile(r"^<{7}\s*COMMIT\s*\n(.*?)\n>{7}\s*COMMIT", re.DOTALL)
 CREATE_PATTERN = re.compile(
-    r"<{7}\s*CREATE:\s*([^\n\r]+?)\s*\n(.*?)>{7}\s*CREATE", re.DOTALL
+    r"<{7}\s*CREATE:\s*([^\n\r]+?)\s*\n"
+    r"(.*?)"
+    r"(?:\n|^)>{7}\s*(CREATE|REPLACE)[ \t]*",
+    re.DOTALL | re.MULTILINE,
 )
 DELETE_PATTERN = re.compile(
     r"<{7}\s*DELETE:\s*([^\n\r]+?)\s*\n>{7}\s*DELETE", re.DOTALL
@@ -757,13 +761,76 @@ def dump_full_legacy(root: Path, out_file: Path, rules: list[str]):
     print(f"✅ Полный дамп всего проекта готов: {out_file}")
 
 
-def dump_project(output_path=None, targets=None, full_dump=False):
+def get_changed_files_since(commit: str, root: Path) -> list[str]:
+    res = run_git(["diff", "--name-only", commit], check=False, cwd=root)
+    if res.returncode != 0:
+        print(f"❌ Ошибка: коммит '{commit}' не найден в Git.")
+        return []
+    return [l.strip() for l in res.stdout.splitlines() if l.strip()]
+
+
+def export_diff(
+    commit: str = "HEAD~1", output_path: str | None = None, to_stdout: bool = False
+):
+    root = get_project_root()
+    if not is_git_repo(root):
+        print("❌ Проект не является Git-репозиторием.")
+        return
+
+    ai_dir = root / AI_DIR_NAME
+    ai_dir.mkdir(exist_ok=True)
+    out_file = Path(output_path) if output_path else (ai_dir / DEFAULT_DIFF_NAME)
+
+    res = run_git(["diff", commit], check=False, cwd=root)
+    if res.returncode != 0:
+        print(f"❌ Ошибка: не удалось получить diff для '{commit}'.")
+        return
+
+    diff_text = res.stdout
+    if not diff_text.strip():
+        print(f"ℹ️  Дифф пуст: изменений с момента '{commit}' нет.")
+        return
+
+    if to_stdout:
+        print(diff_text)
+        return
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(diff_text, encoding="utf-8")
+
+    stat_res = run_git(["diff", "--stat", commit], check=False, cwd=root).stdout.strip()
+    total_lines = len(diff_text.splitlines())
+    est_tokens = int(len(diff_text) / 4)
+
+    print(f"✅ Диффы начиная с '{commit}' сохранены в: {out_file}")
+    print(f"📊 Строк diff: {total_lines} | Примерный объем: ~{est_tokens:,} токенов")
+    if stat_res:
+        print("\nСводка изменений:")
+        for line in stat_res.splitlines()[-5:]:
+            print(f"  {line}")
+
+
+def dump_project(
+    output_path=None, targets=None, full_dump=False, since_commit=None
+):
     root, ai_dir, default_dump, _, dumpignore_file = get_ai_paths()
     ai_dir.mkdir(exist_ok=True)
     out_file = Path(output_path) if output_path else default_dump
     rules = load_dumpignore_rules(dumpignore_file)
 
-    if full_dump:
+    if since_commit:
+        if not is_git_repo(root):
+            print("❌ Флаг --since доступен только в Git-репозиториях.")
+            return
+        changed_files = get_changed_files_since(since_commit, root)
+        if not changed_files:
+            print(f"ℹ️  Нет измененных файлов с момента '{since_commit}'.")
+            return
+        print(
+            f"🔍 Найдено измененных файлов с момента '{since_commit}': {len(changed_files)}"
+        )
+        dump_targeted(root, out_file, changed_files, rules)
+    elif full_dump:
         dump_full_legacy(root, out_file, rules)
     elif targets:
         dump_targeted(root, out_file, targets, rules)
@@ -875,7 +942,17 @@ def apply_patch(patch_path=None, force_push: bool = False):
         return
 
     deletes = DELETE_PATTERN.findall(patch_text)
-    creates = CREATE_PATTERN.findall(patch_text)
+    creates = []
+    for m in CREATE_PATTERN.finditer(patch_text):
+        f_name = m.group(1).strip()
+        content = m.group(2)
+        end_tag = m.group(3).strip()
+        if end_tag == "REPLACE":
+            print(
+                f"⚠️  Предупреждение: блок создания файла '{f_name}' был ошибочно закрыт как '>>>>>>> REPLACE' вместо '>>>>>>> CREATE'. Файл распознан и будет создан!"
+            )
+        creates.append((f_name, content))
+
     replaces = [
         (m.group(1).strip(), m.group(2), m.group(3))
         for m in REPLACE_PATTERN.finditer(patch_text)
@@ -1271,6 +1348,26 @@ def main():
         action="store_true",
         help="Сделать полный дамп всех файлов проекта целиком (легаси режим)",
     )
+    dump_p.add_argument(
+        "--since",
+        help="Сделать дамп файлов, измененных начиная с коммита (например, HEAD~3 или hash)",
+    )
+
+    diff_p = subparsers.add_parser(
+        "diff", help="Сохранить git diff изменений начиная с коммита"
+    )
+    diff_p.add_argument(
+        "commit",
+        nargs="?",
+        default="HEAD~1",
+        help="Коммит, от которого строить diff (по умолчанию 'HEAD~1')",
+    )
+    diff_p.add_argument(
+        "-o", "--output", help="Путь к файлу вывода (по умолчанию .ai/diff.txt)"
+    )
+    diff_p.add_argument(
+        "--stdout", action="store_true", help="Вывести diff в консоль вместо файла"
+    )
 
     apply_p = subparsers.add_parser("apply", help="Применить патч от LLM")
     apply_p.add_argument(
@@ -1322,7 +1419,18 @@ def main():
     if args.command == "init":
         init_project(init_git=args.git, remote_url=args.remote)
     elif args.command == "dump":
-        dump_project(output_path=args.output, targets=args.targets, full_dump=args.full)
+        dump_project(
+            output_path=args.output,
+            targets=args.targets,
+            full_dump=args.full,
+            since_commit=args.since,
+        )
+    elif args.command == "diff":
+        export_diff(
+            commit=args.commit,
+            output_path=args.output,
+            to_stdout=args.stdout,
+        )
     elif args.command == "apply":
         apply_patch(args.file, force_push=args.push)
     elif args.command == "branch":
