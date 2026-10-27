@@ -979,27 +979,35 @@ def apply_patch(patch_path=None, force_push: bool = False):
         for h in all_search_headers:
             hf = h.strip()
             if all_search_headers.count(h) > parsed_files.count(hf):
-                syntax_errors.append(f"SEARCH-блок для '{hf}' (проверьте наличие ======= и >>>>>>> REPLACE)")
+                syntax_errors.append(
+                    f"SEARCH-блок для '{hf}' (проверьте наличие ======= и >>>>>>> REPLACE)"
+                )
 
     if len(creates) < len(all_create_headers):
         parsed_c = [f for f, _ in creates]
         for h in all_create_headers:
             hf = h.strip()
             if all_create_headers.count(h) > parsed_c.count(hf):
-                syntax_errors.append(f"CREATE-блок для '{hf}' (проверьте закрывающий тег >>>>>>> CREATE)")
+                syntax_errors.append(
+                    f"CREATE-блок для '{hf}' (проверьте закрывающий тег >>>>>>> CREATE)"
+                )
 
     if len(deletes) < len(all_delete_headers):
         for h in all_delete_headers:
             hf = h.strip()
             if all_delete_headers.count(h) > deletes.count(hf):
-                syntax_errors.append(f"DELETE-блок для '{hf}' (проверьте закрывающий тег >>>>>>> DELETE)")
+                syntax_errors.append(
+                    f"DELETE-блок для '{hf}' (проверьте закрывающий тег >>>>>>> DELETE)"
+                )
 
     if syntax_errors:
         print("\n🚨 КРИТИЧЕСКАЯ ОШИБКА: Обнаружены поврежденные блоки в патче!")
         print("devtool аварийно остановлен, чтобы не пропустить изменения молча:\n")
         for err in set(syntax_errors):
             print(f"  ❌ {err}")
-        print("\nНикакие файлы не тронуты. Исправьте синтаксис в .ai/patch.txt и повторите apply.")
+        print(
+            "\nНикакие файлы не тронуты. Исправьте синтаксис в .ai/patch.txt и повторите apply."
+        )
         return
 
     print("\n🔍 Предварительная проверка патча...")
