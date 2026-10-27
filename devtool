@@ -184,20 +184,22 @@ TEXT_EXTENSIONS = {
 
 COMMIT_PATTERN = re.compile(r"^<{7}\s*COMMIT\s*\n(.*?)\n>{7}\s*COMMIT", re.DOTALL)
 CREATE_PATTERN = re.compile(
-    r"<{7}\s*CREATE:\s*([^\n\r]+?)\s*\n"
+    r"^[ \t]*<{7}\s*CREATE:\s*([^\n\r]+?)[ \t]*\n"
     r"(.*?)"
-    r"(?:\n|^)>{7}\s*(CREATE|REPLACE)[ \t]*",
+    r"(?:\n|^)[ \t]*>{7,}\s*(CREATE|REPLACE)[ \t]*",
     re.DOTALL | re.MULTILINE,
 )
 DELETE_PATTERN = re.compile(
-    r"<{7}\s*DELETE:\s*([^\n\r]+?)\s*\n>{7}\s*DELETE", re.DOTALL
+    r"^[ \t]*<{7}\s*DELETE:\s*([^\n\r]+?)[ \t]*\n"
+    r"(?:\n|^)[ \t]*>{7,}\s*DELETE[ \t]*",
+    re.MULTILINE,
 )
 REPLACE_PATTERN = re.compile(
-    r"^<{7}\s*SEARCH:\s*([^\n\r]+?)\s*\n"
-    r"((?:(?!\n<{7}|\n={7}[ \t]*\n|\n>{7}).)*?)"
-    r"\n={7}[ \t]*\n"
-    r"((?:(?!\n<{7}|\n>{7}).)*?)"
-    r"\n>{7}[ \t]*REPLACE",
+    r"^[ \t]*<{7}\s*SEARCH:\s*([^\n\r]+?)[ \t]*\n"
+    r"((?:(?!\n[ \t]*<{7}|\n[ \t]*={7,}[ \t]*\n|\n[ \t]*>{7,}).)*?)\n"
+    r"[ \t]*={7,}[ \t]*\n"
+    r"((?:(?!\n[ \t]*<{7}|\n[ \t]*>{7,}).)*?)"
+    r"(?:\n|^)[ \t]*>{7,}\s*REPLACE[ \t]*",
     re.DOTALL | re.MULTILINE,
 )
 
@@ -958,6 +960,46 @@ def apply_patch(patch_path=None, force_push: bool = False):
 
     if not (creates or deletes or replaces):
         print("❌ В файле патча нет инструкций (DELETE, CREATE или SEARCH/REPLACE).")
+        return
+
+    # ------------------ ЖЕСТКАЯ ВАЛИДАЦИЯ СИНТАКСИСА ------------------
+    all_search_headers = re.findall(
+        r"^[ \t]*<{7}\s*SEARCH:\s*([^\n\r]+)", patch_text, re.MULTILINE
+    )
+    all_create_headers = re.findall(
+        r"^[ \t]*<{7}\s*CREATE:\s*([^\n\r]+)", patch_text, re.MULTILINE
+    )
+    all_delete_headers = re.findall(
+        r"^[ \t]*<{7}\s*DELETE:\s*([^\n\r]+)", patch_text, re.MULTILINE
+    )
+
+    syntax_errors = []
+    if len(replaces) < len(all_search_headers):
+        parsed_files = [f for f, _, _ in replaces]
+        for h in all_search_headers:
+            hf = h.strip()
+            if all_search_headers.count(h) > parsed_files.count(hf):
+                syntax_errors.append(f"SEARCH-блок для '{hf}' (проверьте наличие ======= и >>>>>>> REPLACE)")
+
+    if len(creates) < len(all_create_headers):
+        parsed_c = [f for f, _ in creates]
+        for h in all_create_headers:
+            hf = h.strip()
+            if all_create_headers.count(h) > parsed_c.count(hf):
+                syntax_errors.append(f"CREATE-блок для '{hf}' (проверьте закрывающий тег >>>>>>> CREATE)")
+
+    if len(deletes) < len(all_delete_headers):
+        for h in all_delete_headers:
+            hf = h.strip()
+            if all_delete_headers.count(h) > deletes.count(hf):
+                syntax_errors.append(f"DELETE-блок для '{hf}' (проверьте закрывающий тег >>>>>>> DELETE)")
+
+    if syntax_errors:
+        print("\n🚨 КРИТИЧЕСКАЯ ОШИБКА: Обнаружены поврежденные блоки в патче!")
+        print("devtool аварийно остановлен, чтобы не пропустить изменения молча:\n")
+        for err in set(syntax_errors):
+            print(f"  ❌ {err}")
+        print("\nНикакие файлы не тронуты. Исправьте синтаксис в .ai/patch.txt и повторите apply.")
         return
 
     print("\n🔍 Предварительная проверка патча...")
