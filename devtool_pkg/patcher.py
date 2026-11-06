@@ -247,7 +247,6 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
             )
         )
         stripped_search = search_b.strip()
-        stripped_replace = replace_b.strip()
         if not stripped_search:
             violations.append(
                 RuleViolation(
@@ -257,22 +256,6 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
                     law_reference="Section III.3 (Non-Empty SEARCH Block)",
                     code_snippet="<empty SEARCH>",
                     message=f"SEARCH block in '{f_name}' must not be empty.",
-                )
-            )
-        elif stripped_search in stripped_replace:
-            first_line_snippet = stripped_search.splitlines()[0]
-            violations.append(
-                RuleViolation(
-                    file_path=f_name,
-                    line_number=1,
-                    rule_id="PATCH-NON-IDEMPOTENT-SEARCH",
-                    law_reference="Section III.3 (Patch Idempotency & No Duplicate Application)",
-                    code_snippet=first_line_snippet,
-                    message=(
-                        f"SEARCH block in '{f_name}' is a verbatim substring of REPLACE block. "
-                        "Re-applying this patch would match again and duplicate code. "
-                        "Include context on BOTH sides of the insertion or mutate the matched line itself."
-                    ),
                 )
             )
 
@@ -473,13 +456,34 @@ def apply_patch(
                 )
 
             current_text = staged_files[rel_p]
-            occurrences = current_text.count(rep_op.search_block)
+            s_strip = rep_op.search_block.strip()
+            r_strip = rep_op.replace_block.strip()
             first_search_line = (
-                rep_op.search_block.strip().splitlines()[0]
-                if rep_op.search_block.strip()
+                s_strip.splitlines()[0]
+                if s_strip
                 else "<empty search>"
             )
 
+            if s_strip and s_strip in r_strip and rep_op.replace_block in current_text:
+                all_violations.append(
+                    RuleViolation(
+                        file_path=rel_p,
+                        line_number=1,
+                        rule_id="PATCH-ALREADY-APPLIED",
+                        law_reference="Section III.3 (Patch Idempotency & No Duplicate Application)",
+                        code_snippet=first_search_line,
+                        message=(
+                            f"REPLACE block for '{rel_p}' is already present in the file. "
+                            "Application aborted to prevent duplicate changes."
+                        ),
+                    )
+                )
+                preliminary_statuses.append(
+                    ("REPLACE", rel_p, False, "REPLACE block already present in file")
+                )
+                continue
+
+            occurrences = current_text.count(rep_op.search_block)
             if occurrences == 0:
                 approx_line, diff_msg = _build_search_mismatch_diff(
                     rel_p, current_text, rep_op.search_block
@@ -525,14 +529,49 @@ def apply_patch(
                     )
                 )
             else:
+                is_eof = current_text.rstrip().endswith(rep_op.search_block.rstrip())
+                is_bof = current_text.lstrip().startswith(rep_op.search_block.lstrip())
+                if s_strip in r_strip and not is_eof and not is_bof:
+                    all_violations.append(
+                        RuleViolation(
+                            file_path=rel_p,
+                            line_number=1,
+                            rule_id="PATCH-NON-IDEMPOTENT-SEARCH",
+                            law_reference="Section III.3 (Patch Idempotency & No Duplicate Application)",
+                            code_snippet=first_search_line,
+                            message=(
+                                f"SEARCH block in '{rel_p}' is a verbatim substring of REPLACE block in the middle of the file. "
+                                "Capture context on BOTH sides of the insertion or mutate the anchor line itself."
+                            ),
+                        )
+                    )
+                    preliminary_statuses.append(
+                        (
+                            "REPLACE",
+                            rel_p,
+                            False,
+                            "non-idempotent SEARCH in REPLACE (middle of file)",
+                        )
+                    )
+                    continue
+
                 updated_text = current_text.replace(
                     rep_op.search_block, rep_op.replace_block, 1
                 )
                 if updated_text and not updated_text.endswith("\n"):
                     updated_text += "\n"
                 staged_files[rel_p] = updated_text
+                match_note = (
+                    "100% exact match (EOF append)"
+                    if is_eof
+                    else (
+                        "100% exact match (BOF prepend)"
+                        if is_bof
+                        else "100% exact match"
+                    )
+                )
                 preliminary_statuses.append(
-                    ("REPLACE", rel_p, True, "100% exact match")
+                    ("REPLACE", rel_p, True, match_note)
                 )
 
     op_totals_per_file: dict[tuple[str, str], int] = {}
@@ -646,12 +685,6 @@ def apply_patch(
             if (label_type, rel_p) in in_block_counts
             else 0
         )
-        is_non_idempotent = False
-        if ord_op.replace_op is not None:
-            s_strip = ord_op.replace_op.search_block.strip()
-            r_strip = ord_op.replace_op.replace_block.strip()
-            if not s_strip or s_strip in r_strip:
-                is_non_idempotent = True
 
         if not stage_ok:
             final_statuses.append(
@@ -660,15 +693,6 @@ def apply_patch(
                     rel_path=rel_p,
                     passed=False,
                     detail=stage_detail,
-                )
-            )
-        elif is_non_idempotent:
-            final_statuses.append(
-                OperationStatus(
-                    op_type=label_type,
-                    rel_path=rel_p,
-                    passed=False,
-                    detail=f"{range_str}{stage_detail}, non-idempotent SEARCH in REPLACE",
                 )
             )
         elif b_count > 0:
