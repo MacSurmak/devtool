@@ -13,7 +13,6 @@ from devtool_pkg.constants import (
     HEADER_CREATE_PATTERN,
     HEADER_DELETE_PATTERN,
     HEADER_SEARCH_PATTERN,
-    MIN_SEARCH_CONTEXT_LINES,
     OPEN_MARK,
     PATCH_PLACEHOLDER_TEXT,
     REPLACE_PATTERN,
@@ -162,20 +161,32 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
         violations.extend(
             validate_text_block_for_omissions(f_name, "REPLACE", replace_b)
         )
-        non_empty_search = [
-            ln.strip() for ln in search_b.splitlines() if ln.strip()
-        ]
-        if len(non_empty_search) < MIN_SEARCH_CONTEXT_LINES:
+        stripped_search = search_b.strip()
+        stripped_replace = replace_b.strip()
+        if not stripped_search:
             violations.append(
                 RuleViolation(
                     file_path=f_name,
                     line_number=1,
-                    rule_id="PATCH-SEARCH-CONTEXT",
-                    law_reference="Section III.3 (SEARCH Context Requirement)",
-                    code_snippet=search_b.strip(),
+                    rule_id="PATCH-SEARCH-EMPTY",
+                    law_reference="Section III.3 (Non-Empty SEARCH Block)",
+                    code_snippet="<empty SEARCH>",
+                    message=f"SEARCH block in '{f_name}' must not be empty.",
+                )
+            )
+        elif stripped_search in stripped_replace:
+            first_line_snippet = stripped_search.splitlines()[0]
+            violations.append(
+                RuleViolation(
+                    file_path=f_name,
+                    line_number=1,
+                    rule_id="PATCH-NON-IDEMPOTENT-SEARCH",
+                    law_reference="Section III.3 (Patch Idempotency & No Duplicate Application)",
+                    code_snippet=first_line_snippet,
                     message=(
-                        f"SEARCH block in '{f_name}' has only {len(non_empty_search)} non-empty line(s). "
-                        "Capture at least 3-5 surrounding context lines for unique anchoring."
+                        f"SEARCH block in '{f_name}' is a verbatim substring of REPLACE block. "
+                        "Re-applying this patch would match again and duplicate code. "
+                        "Include context on BOTH sides of the insertion or mutate the matched line itself."
                     ),
                 )
             )
