@@ -29,8 +29,10 @@ def is_text_file(file_path: Path) -> bool:
         with open(file_path, "rb") as handle:
             chunk = handle.read(BINARY_CHECK_CHUNK_SIZE)
             return b"\x00" not in chunk
-    except OSError:
-        return False
+    except OSError as exc:
+        raise ConfigurationError(
+            f"Failed to read file for binary inspection '{file_path}': {exc}"
+        ) from exc
 
 
 def build_skeleton_tree(
@@ -46,8 +48,10 @@ def build_skeleton_tree(
             list(dir_path.iterdir()),
             key=lambda item: (item.is_file(), item.name.lower()),
         )
-    except (PermissionError, OSError):
-        return [prefix + "└── [Access Denied]"]
+    except (PermissionError, OSError) as exc:
+        raise ConfigurationError(
+            f"Failed to list directory '{dir_path}': {exc}"
+        ) from exc
 
     valid_entries: list[Path] = []
     for entry in entries:

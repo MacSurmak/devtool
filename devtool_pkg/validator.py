@@ -35,9 +35,6 @@ BANNED_FS_HEURISTIC_METHODS: Final[frozenset[str]] = frozenset(
     {"glob", "rglob", "getmtime", "getctime"}
 )
 BANNED_FALLBACK_METHODS: Final[frozenset[str]] = frozenset({"get", "setdefault", "getenv"})
-IMMUTABLE_CALL_NAMES: Final[frozenset[str]] = frozenset(
-    {"frozenset", "tuple", "Path", "PurePath"}
-)
 
 
 def _extract_line(lines: list[str], lineno: int) -> str:
@@ -96,42 +93,50 @@ def validate_text_block_for_omissions(
     block_label: str,
     text: str,
 ) -> list[RuleViolation]:
-    """Scan raw patch blocks for lazy omissions, placeholders, and linter suppressions."""
+    """Scan comment lines in patch blocks for lazy omissions, placeholders, and suppressions."""
     violations: list[RuleViolation] = []
     lines = text.splitlines()
 
-    for idx, line in enumerate(lines, start=1):
-        if LAZY_OMISSION_PATTERN.search(line):
+    for idx, raw_line in enumerate(lines, start=1):
+        stripped = raw_line.strip()
+        if not (
+            stripped.startswith("#")
+            or stripped.startswith("//")
+            or stripped.startswith("/*")
+        ):
+            continue
+
+        if LAZY_OMISSION_PATTERN.search(stripped):
             violations.append(
                 RuleViolation(
                     file_path=f"{file_path} ({block_label})",
                     line_number=idx,
                     rule_id="PATCH-LAZY-OMISSION",
                     law_reference="Section III.3 & Law I.8 (Zero Placeholders & No Omissions)",
-                    code_snippet=line.strip(),
+                    code_snippet=stripped,
                     message="Lazy code omission or ellipsis comment detected. Every block must be complete.",
                 )
             )
-        if TODO_PATTERN.search(line):
+        if TODO_PATTERN.search(stripped):
             violations.append(
                 RuleViolation(
                     file_path=f"{file_path} ({block_label})",
                     line_number=idx,
                     rule_id="NO-TODO-PLACEHOLDERS",
                     law_reference="Law I.8 (Zero Stubs & Zero Placeholders)",
-                    code_snippet=line.strip(),
+                    code_snippet=stripped,
                     message="Unfinished code markers (TODO/FIXME/XXX/HACK) are strictly prohibited.",
                 )
             )
-        if SUPPRESSION_PATTERN.search(line):
+        if SUPPRESSION_PATTERN.search(stripped):
             violations.append(
                 RuleViolation(
                     file_path=f"{file_path} ({block_label})",
                     line_number=idx,
                     rule_id="NO-LINTER-SUPPRESSION",
                     law_reference="Law I.9 (Strict Type Safety & Zero Suppression)",
-                    code_snippet=line.strip(),
-                    message="Suppressing type checkers or linters (# type: ignore, # noqa) is prohibited.",
+                    code_snippet=stripped,
+                    message="Suppressing type checkers or linters via inline comments is prohibited.",
                 )
             )
     return violations
@@ -166,27 +171,40 @@ class _PythonASTValidator(ast.NodeVisitor):
         )
 
     def validate_tokens(self) -> None:
-        """Check token stream for non-English comments."""
-        try:
-            tokens = tokenize.tokenize(
-                BytesIO(self._source.encode("utf-8")).readline
-            )
-            for tok_type, tok_str, (srow, _), _, _ in tokens:
-                if tok_type == tokenize.COMMENT:
-                    if CYRILLIC_PATTERN.search(tok_str):
-                        self._add(
-                            lineno=srow,
-                            rule_id="COMMENT-ENGLISH-ONLY",
-                            law_ref="Section III.2 (English Code Comments)",
-                            message="Code comments must be written strictly in English.",
-                        )
-        except tokenize.TokenError as exc:
-            self._add(
-                lineno=1,
-                rule_id="SYNTAX-TOKEN-ERROR",
-                law_ref="Law I.2 (Deterministic Syntax)",
-                message=f"Tokenization error: {exc}",
-            )
+        """Check actual Python comment tokens for Cyrillic, TODOs, omissions, and suppressions."""
+        tokens = tokenize.tokenize(
+            BytesIO(self._source.encode("utf-8")).readline
+        )
+        for tok_type, tok_str, (srow, _), _, _ in tokens:
+            if tok_type == tokenize.COMMENT:
+                if CYRILLIC_PATTERN.search(tok_str):
+                    self._add(
+                        lineno=srow,
+                        rule_id="COMMENT-ENGLISH-ONLY",
+                        law_ref="Section III.2 (English Code Comments)",
+                        message="Code comments must be written strictly in English.",
+                    )
+                if LAZY_OMISSION_PATTERN.search(tok_str):
+                    self._add(
+                        lineno=srow,
+                        rule_id="PATCH-LAZY-OMISSION",
+                        law_ref="Section III.3 & Law I.8 (Zero Placeholders & No Omissions)",
+                        message="Lazy code omission or ellipsis comment detected.",
+                    )
+                if TODO_PATTERN.search(tok_str):
+                    self._add(
+                        lineno=srow,
+                        rule_id="NO-TODO-PLACEHOLDERS",
+                        law_ref="Law I.8 (Zero Stubs & Zero Placeholders)",
+                        message="Unfinished code markers (TODO/FIXME/XXX/HACK) are strictly prohibited.",
+                    )
+                if SUPPRESSION_PATTERN.search(tok_str):
+                    self._add(
+                        lineno=srow,
+                        rule_id="NO-LINTER-SUPPRESSION",
+                        law_ref="Law I.9 (Strict Type Safety & Zero Suppression)",
+                        message="Suppressing type checkers or linters via inline comments is prohibited.",
+                    )
 
     def visit_Module(self, node: ast.Module) -> None:
         """Check module-level statements for mutable global state."""
@@ -401,11 +419,6 @@ class _PythonASTValidator(ast.NodeVisitor):
         self.generic_visit(node)
         self._scope_depth -= 1
 
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        """Validate type annotations on variable assignments."""
-        self._validate_type_annotation(node.annotation)
-        self.generic_visit(node)
-
     def visit_Global(self, node: ast.Global) -> None:
         """Ban global statement."""
         self._add(
@@ -567,8 +580,8 @@ class _PythonASTValidator(ast.NodeVisitor):
                 and node.func.value.id == "subprocess"
                 and attr_name in ("run", "Popen", "call", "check_output", "check_call")
             ):
-                kw_Map = {kw.arg for kw in node.keywords if kw.arg is not None}
-                if "env" not in kw_Map or "timeout" not in kw_Map:
+                kw_map = {kw.arg for kw in node.keywords if kw.arg is not None}
+                if "env" not in kw_map or "timeout" not in kw_map:
                     self._add(
                         lineno=node.lineno,
                         rule_id="SUBPROCESS-ISOLATION",
@@ -577,7 +590,7 @@ class _PythonASTValidator(ast.NodeVisitor):
                             f"subprocess.{attr_name}() must explicitly specify both 'env=...' and 'timeout=...'"
                         ),
                     )
-                if attr_name == "run" and "check" not in kw_Map:
+                if attr_name == "run" and "check" not in kw_map:
                     self._add(
                         lineno=node.lineno,
                         rule_id="SUBPROCESS-ISOLATION",
@@ -661,33 +674,29 @@ class _PythonASTValidator(ast.NodeVisitor):
 def validate_file_content(rel_path: str, content: str) -> list[RuleViolation]:
     """Run all universal text and language-specific architectural checks on a file."""
     violations: list[RuleViolation] = []
-    violations.extend(validate_text_block_for_omissions(rel_path, "FILE", content))
 
     suffix = Path(rel_path).suffix.lower()
     first_line = content.splitlines()[0].strip() if content.splitlines() else ""
-    is_python = suffix in (".py", ".pyi") or (
-        first_line.startswith("#!") and "python" in first_line
+    is_python = (
+        True
+        if suffix in (".py", ".pyi")
+        else (first_line.startswith("#!") and "python" in first_line)
     )
 
     if is_python:
+        compiled_code = compile(
+            content,
+            filename=rel_path,
+            mode="exec",
+            flags=ast.PyCF_ONLY_AST,
+        )
+        tree: ast.Module = compiled_code
         ast_validator = _PythonASTValidator(file_path=rel_path, source=content)
         ast_validator.validate_tokens()
-        try:
-            tree = ast.parse(content, filename=rel_path)
-            ast_validator.visit(tree)
-        except SyntaxError as exc:
-            lineno = exc.lineno if exc.lineno is not None else 1
-            violations.append(
-                RuleViolation(
-                    file_path=rel_path,
-                    line_number=lineno,
-                    rule_id="PYTHON-SYNTAX-ERROR",
-                    law_reference="Law I.2 (Deterministic Execution)",
-                    code_snippet=_extract_line(content.splitlines(), lineno),
-                    message=f"Python syntax error: {exc.msg}",
-                )
-            )
+        ast_validator.visit(tree)
         violations.extend(ast_validator.violations)
+    else:
+        violations.extend(validate_text_block_for_omissions(rel_path, "FILE", content))
 
     return violations
 

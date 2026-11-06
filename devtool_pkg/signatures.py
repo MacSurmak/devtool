@@ -13,6 +13,7 @@ from devtool_pkg.constants import (
     MAX_SIGNATURES_LIMIT,
     SIGNATURE_REST_MAX_LEN,
 )
+from devtool_pkg.errors import ConfigurationError
 
 JS_TS_SIG_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^\s*(export\s+)?(async\s+)?(function|class|interface|type)\s+([A-Za-z0-9_$]+)(.*?)(?:\{|=|$)",
@@ -34,8 +35,10 @@ def extract_python_signatures(content: str) -> list[str]:
     """Extract top-level function and class method signatures from Python code."""
     try:
         tree = ast.parse(content)
-    except SyntaxError:
-        return []
+    except SyntaxError as exc:
+        raise ConfigurationError(
+            f"Failed to parse Python AST for signature extraction at line {exc.lineno}: {exc.msg}"
+        ) from exc
 
     sigs: list[str] = []
     for node in tree.body:
@@ -142,9 +145,13 @@ def extract_config_signatures(path: Path, content: str) -> list[str]:
             return [f"keys: [{', '.join(keys[:MAX_CONFIG_KEYS_LIMIT])}]"]
     elif ext == ".json":
         try:
-            parsed: object = json.loads(content)
-        except json.JSONDecodeError:
-            return []
+            parsed: dict[str, str | int | float | bool | None] | list[str] = json.loads(
+                content
+            )
+        except json.JSONDecodeError as exc:
+            raise ConfigurationError(
+                f"Invalid JSON in '{path}': {exc.msg} at line {exc.lineno}"
+            ) from exc
         if isinstance(parsed, dict):
             str_keys = [str(k) for k in list(parsed.keys())[:MAX_CONFIG_KEYS_LIMIT]]
             return [f"keys: [{', '.join(str_keys)}]"]
@@ -180,8 +187,10 @@ def extract_file_signatures(path: Path) -> list[str]:
     """Dispatch signature extraction based on file extension or shebang."""
     try:
         content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+    except OSError as exc:
+        raise ConfigurationError(
+            f"Failed to read file '{path}' for signature extraction: {exc}"
+        ) from exc
 
     ext = path.suffix.lower()
     lines = content.splitlines()

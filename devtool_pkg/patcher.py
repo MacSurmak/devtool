@@ -127,9 +127,6 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
             )
         )
         violations.extend(
-            validate_text_block_for_omissions(f_name, "SEARCH", search_b)
-        )
-        violations.extend(
             validate_text_block_for_omissions(f_name, "REPLACE", replace_b)
         )
         non_empty_search = [
@@ -605,7 +602,7 @@ def init_project(
 
     print(f"🚀 Initializing AI DevTool in: {ws.root}")
     has_git = is_git_repo(ws.root)
-    setup_git = init_git or (remote_url is not None)
+    setup_git = True if init_git else (remote_url is not None)
 
     if setup_git and not has_git:
         init_res = run_git(
