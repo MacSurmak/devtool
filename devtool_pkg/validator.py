@@ -1,40 +1,42 @@
-"""Universal AST, token, and text architectural law validator."""
+"""Industrial architectural validator powered by Ruff JSON engine and strict AST invariants."""
 
 import ast
+import json
+import os
 import re
-import tokenize
-from io import BytesIO
+import subprocess
 from pathlib import Path
 from typing import Final
 
+from devtool_pkg.constants import RUFF_SELECT_RULES, SUBPROCESS_TIMEOUT_SEC
+from devtool_pkg.errors import ConfigurationError
 from devtool_pkg.models import OperationStatus, RuleViolation
 
 CYRILLIC_PATTERN: Final[re.Pattern[str]] = re.compile(r"[а-яА-ЯёЁ]")
-SUPPRESSION_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"#\s*(type:\s*ignore|noqa|pragma:\s*no\s*cover|pylint:\s*disable|ruff:\s*noqa)",
-    re.IGNORECASE,
-)
-TODO_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(?:#|//|/\*)\s*\b(TODO|FIXME|XXX|HACK)\b",
-    re.IGNORECASE,
-)
-LAZY_OMISSION_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"(?:#|//|/\*)\s*(\.\.\.|remaining\s+code|existing\s+code|rest\s+of|остальной\s+код|без\s+изменений)",
+LAZY_ELLIPSIS_COMMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:#|//|/\*)\s*(\.\.\.|remaining\s+code|existing\s+code|rest\s+of|остальной\s+код|без\s+изменений)",
     re.IGNORECASE,
 )
 
-BANNED_BROAD_EXCEPTIONS: Final[frozenset[str]] = frozenset(
-    {"Exception", "BaseException"}
+BARE_COLLECTION_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        "dict",
+        "list",
+        "tuple",
+        "set",
+        "frozenset",
+        "Dict",
+        "List",
+        "Tuple",
+        "Set",
+        "FrozenSet",
+    }
 )
 BANNED_TYPE_IDENTIFIERS: Final[frozenset[str]] = frozenset({"Any", "object"})
-BARE_COLLECTION_TYPES: Final[frozenset[str]] = frozenset(
-    {"dict", "list", "tuple", "set", "frozenset", "Dict", "List", "Tuple", "Set", "FrozenSet"}
-)
 BANNED_FS_HEURISTIC_MODULES: Final[frozenset[str]] = frozenset({"glob", "fnmatch"})
 BANNED_FS_HEURISTIC_METHODS: Final[frozenset[str]] = frozenset(
     {"glob", "rglob", "getmtime", "getctime"}
 )
-BANNED_FALLBACK_METHODS: Final[frozenset[str]] = frozenset({"get", "setdefault", "getenv"})
 
 
 def _extract_line(lines: list[str], lineno: int) -> str:
@@ -45,7 +47,7 @@ def _extract_line(lines: list[str], lineno: int) -> str:
 
 
 def validate_commit_message(commit_msg: str) -> list[RuleViolation]:
-    """Validate commit message language and formatting rules."""
+    """Validate commit message language and single-sentence formatting rules."""
     violations: list[RuleViolation] = []
     cleaned = commit_msg.strip()
     if not cleaned:
@@ -93,64 +95,100 @@ def validate_text_block_for_omissions(
     block_label: str,
     text: str,
 ) -> list[RuleViolation]:
-    """Scan comment lines in patch blocks for lazy omissions, placeholders, and suppressions."""
+    """Scan lines in blocks for lazy code-omission comments (# ... remaining code ...)."""
     violations: list[RuleViolation] = []
-    lines = text.splitlines()
-
-    for idx, raw_line in enumerate(lines, start=1):
-        stripped = raw_line.strip()
-        if not (
-            stripped.startswith("#")
-            or stripped.startswith("//")
-            or stripped.startswith("/*")
-        ):
-            continue
-
-        if LAZY_OMISSION_PATTERN.search(stripped):
+    for idx, raw_line in enumerate(text.splitlines(), start=1):
+        if LAZY_ELLIPSIS_COMMENT_PATTERN.search(raw_line):
             violations.append(
                 RuleViolation(
                     file_path=f"{file_path} ({block_label})",
                     line_number=idx,
                     rule_id="PATCH-LAZY-OMISSION",
                     law_reference="Section III.3 & Law I.8 (Zero Placeholders & No Omissions)",
-                    code_snippet=stripped,
+                    code_snippet=raw_line.strip(),
                     message="Lazy code omission or ellipsis comment detected. Every block must be complete.",
-                )
-            )
-        if TODO_PATTERN.search(stripped):
-            violations.append(
-                RuleViolation(
-                    file_path=f"{file_path} ({block_label})",
-                    line_number=idx,
-                    rule_id="NO-TODO-PLACEHOLDERS",
-                    law_reference="Law I.8 (Zero Stubs & Zero Placeholders)",
-                    code_snippet=stripped,
-                    message="Unfinished code markers (TODO/FIXME/XXX/HACK) are strictly prohibited.",
-                )
-            )
-        if SUPPRESSION_PATTERN.search(stripped):
-            violations.append(
-                RuleViolation(
-                    file_path=f"{file_path} ({block_label})",
-                    line_number=idx,
-                    rule_id="NO-LINTER-SUPPRESSION",
-                    law_reference="Law I.9 (Strict Type Safety & Zero Suppression)",
-                    code_snippet=stripped,
-                    message="Suppressing type checkers or linters via inline comments is prohibited.",
                 )
             )
     return violations
 
 
-class _PythonASTValidator(ast.NodeVisitor):
-    """Deep AST visitor enforcing all universal architectural laws on Python files."""
+def _run_ruff_json_check(rel_path: str, content: str) -> list[RuleViolation]:
+    """Run isolated Ruff linter via stdin and convert JSON diagnostics into RuleViolations."""
+    env_copy: dict[str, str] = dict(os.environ)
+    cmd = [
+        "ruff",
+        "check",
+        "--isolated",
+        "--output-format=json",
+        f"--select={RUFF_SELECT_RULES}",
+        "--stdin-filename",
+        rel_path,
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            cmd,
+            input=content,
+            env=env_copy,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SEC,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise ConfigurationError(
+            "Required industrial linter 'ruff' is not installed. Install it via: pip install ruff"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigurationError(
+            f"Ruff validation timed out on '{rel_path}'."
+        ) from exc
+
+    raw_out = completed.stdout.strip()
+    if not raw_out or raw_out == "[]":
+        return []
+
+    try:
+        diagnostics: list[dict[str, str | int | dict[str, int]]] = json.loads(
+            raw_out
+        )
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            f"Failed to parse Ruff JSON output for '{rel_path}': {exc.msg}"
+        ) from exc
+
+    lines = content.splitlines()
+    violations: list[RuleViolation] = []
+    for item in diagnostics:
+        code_val = str(item["code"]) if "code" in item and item["code"] is not None else "SYNTAX"
+        msg_val = str(item["message"]) if "message" in item else "Linter violation"
+        lineno = 1
+        if "location" in item and isinstance(item["location"], dict):
+            loc_dict = item["location"]
+            if "row" in loc_dict and isinstance(loc_dict["row"], int):
+                lineno = loc_dict["row"]
+
+        violations.append(
+            RuleViolation(
+                file_path=rel_path,
+                line_number=lineno,
+                rule_id=f"RUFF-{code_val}",
+                law_reference="Industrial Static Analysis (Ruff Engine)",
+                code_snippet=_extract_line(lines, lineno),
+                message=msg_val,
+            )
+        )
+    return violations
+
+
+class _StrictArchitecturalASTInvariants(ast.NodeVisitor):
+    """AST visitor enforcing strictly those architectural invariants not covered by Ruff."""
 
     def __init__(self, file_path: str, source: str) -> None:
         self._file_path: str = file_path
-        self._source: str = source
         self._lines: list[str] = source.splitlines()
         self.violations: list[RuleViolation] = []
-        self._scope_depth: int = 0
+        self._awaited_calls: set[int] = set()
 
     def _add(
         self,
@@ -170,55 +208,25 @@ class _PythonASTValidator(ast.NodeVisitor):
             )
         )
 
-    def validate_tokens(self) -> None:
-        """Check actual Python comment tokens for Cyrillic, TODOs, omissions, and suppressions."""
-        tokens = tokenize.tokenize(
-            BytesIO(self._source.encode("utf-8")).readline
-        )
-        for tok_type, tok_str, (srow, _), _, _ in tokens:
-            if tok_type == tokenize.COMMENT:
-                if CYRILLIC_PATTERN.search(tok_str):
-                    self._add(
-                        lineno=srow,
-                        rule_id="COMMENT-ENGLISH-ONLY",
-                        law_ref="Section III.2 (English Code Comments)",
-                        message="Code comments must be written strictly in English.",
-                    )
-                if LAZY_OMISSION_PATTERN.search(tok_str):
-                    self._add(
-                        lineno=srow,
-                        rule_id="PATCH-LAZY-OMISSION",
-                        law_ref="Section III.3 & Law I.8 (Zero Placeholders & No Omissions)",
-                        message="Lazy code omission or ellipsis comment detected.",
-                    )
-                if TODO_PATTERN.search(tok_str):
-                    self._add(
-                        lineno=srow,
-                        rule_id="NO-TODO-PLACEHOLDERS",
-                        law_ref="Law I.8 (Zero Stubs & Zero Placeholders)",
-                        message="Unfinished code markers (TODO/FIXME/XXX/HACK) are strictly prohibited.",
-                    )
-                if SUPPRESSION_PATTERN.search(tok_str):
-                    self._add(
-                        lineno=srow,
-                        rule_id="NO-LINTER-SUPPRESSION",
-                        law_ref="Law I.9 (Strict Type Safety & Zero Suppression)",
-                        message="Suppressing type checkers or linters via inline comments is prohibited.",
-                    )
+    def visit_Await(self, node: ast.Await) -> None:
+        """Record awaited call nodes so async network/queue .get() calls are not misflagged as dict fallbacks."""
+        if isinstance(node.value, ast.Call):
+            self._awaited_calls.add(id(node.value))
+        self.generic_visit(node)
 
     def visit_Module(self, node: ast.Module) -> None:
-        """Check module-level statements for mutable global state."""
+        """Enforce explicit type annotations and immutability on module-level variables."""
         for stmt in node.body:
             if isinstance(stmt, ast.Assign):
                 for target in stmt.targets:
                     if isinstance(target, ast.Name) and target.id != "__all__":
                         self._add(
                             lineno=stmt.lineno,
-                            rule_id="STRICT-TYPE-ANNOTATIONS",
+                            rule_id="MODULE-VAR-UNTYPED",
                             law_ref="Law I.9 (Total Static Typing)",
                             message=(
                                 f"Module-level variable '{target.id}' must have an explicit "
-                                "type annotation (preferably Final[...])."
+                                "type annotation (e.g., Final[...])."
                             ),
                         )
             elif isinstance(stmt, ast.AnnAssign):
@@ -227,23 +235,16 @@ class _PythonASTValidator(ast.NodeVisitor):
                         self._add(
                             lineno=stmt.lineno,
                             rule_id="NO-GLOBAL-MUTABLE-STATE",
-                            law_ref="Law I.5 (Pure State & Immutability)",
+                            law_ref="Law I.5 (Stateless Purity & Immutability)",
                             message=(
                                 f"Mutable global collection '{stmt.target.id}' is prohibited at module level. "
-                                "Use immutable tuple or frozenset."
+                                "Use immutable tuple/frozenset or encapsulate state in a class/database."
                             ),
                         )
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
-        """Enforce top-level imports only and ban filesystem heuristic modules."""
-        if self._scope_depth > 0:
-            self._add(
-                lineno=node.lineno,
-                rule_id="STRICT-DAG-NO-LAZY-IMPORT",
-                law_ref="Law I.6 (Strict DAG & No Runtime Imports)",
-                message="Runtime imports inside functions, classes, or blocks are strictly prohibited.",
-            )
+        """Ban filesystem heuristic globbing modules."""
         for alias in node.names:
             root_mod = alias.name.split(".")[0]
             if root_mod in BANNED_FS_HEURISTIC_MODULES:
@@ -256,14 +257,7 @@ class _PythonASTValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        """Enforce top-level imports and ban Any or globbing imports."""
-        if self._scope_depth > 0:
-            self._add(
-                lineno=node.lineno,
-                rule_id="STRICT-DAG-NO-LAZY-IMPORT",
-                law_ref="Law I.6 (Strict DAG & No Runtime Imports)",
-                message="Runtime imports inside functions, classes, or blocks are strictly prohibited.",
-            )
+        """Ban filesystem heuristic globbing modules and Any imports."""
         if node.module is not None:
             root_mod = node.module.split(".")[0]
             if root_mod in BANNED_FS_HEURISTIC_MODULES:
@@ -283,7 +277,7 @@ class _PythonASTValidator(ast.NodeVisitor):
                 )
         self.generic_visit(node)
 
-    def _validate_function_node(
+    def _check_function_invariants(
         self,
         node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> None:
@@ -297,15 +291,7 @@ class _PythonASTValidator(ast.NodeVisitor):
                     "All parameters must be passed explicitly."
                 ),
             )
-
-        if node.returns is None:
-            self._add(
-                lineno=node.lineno,
-                rule_id="STRICT-TYPE-ANNOTATIONS",
-                law_ref="Law I.9 (Total Static Typing)",
-                message=f"Function '{node.name}' is missing a return type annotation.",
-            )
-        else:
+        if node.returns is not None:
             self._validate_type_annotation(node.returns)
 
         all_args: list[ast.arg] = (
@@ -313,38 +299,22 @@ class _PythonASTValidator(ast.NodeVisitor):
             + list(node.args.args)
             + list(node.args.kwonlyargs)
         )
-        if node.args.vararg is not None:
-            all_args.append(node.args.vararg)
-        if node.args.kwarg is not None:
-            all_args.append(node.args.kwarg)
-
         for arg in all_args:
-            if arg.arg in ("self", "cls"):
-                continue
-            if arg.annotation is None:
-                self._add(
-                    lineno=node.lineno,
-                    rule_id="STRICT-TYPE-ANNOTATIONS",
-                    law_ref="Law I.9 (Total Static Typing)",
-                    message=f"Parameter '{arg.arg}' in function '{node.name}' is missing a type annotation.",
-                )
-            else:
+            if arg.annotation is not None:
                 self._validate_type_annotation(arg.annotation)
 
-        self._scope_depth += 1
         self.generic_visit(node)
-        self._scope_depth -= 1
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        """Validate synchronous function definitions."""
-        self._validate_function_node(node)
+        """Validate synchronous function invariants."""
+        self._check_function_invariants(node)
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        """Validate asynchronous function definitions."""
-        self._validate_function_node(node)
+        """Validate asynchronous function invariants."""
+        self._check_function_invariants(node)
 
     def _validate_type_annotation(self, annotation: ast.AST) -> None:
-        """Recursively verify that a type annotation contains no Any, object, or bare generics."""
+        """Verify that a type annotation contains no Any, object, or unparameterized generics."""
         if isinstance(annotation, ast.Name):
             if annotation.id in BANNED_TYPE_IDENTIFIERS:
                 self._add(
@@ -387,7 +357,7 @@ class _PythonASTValidator(ast.NodeVisitor):
                 self._validate_type_annotation(elt)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        """Enforce frozen=True on dataclasses and check class body."""
+        """Enforce frozen=True on all @dataclass definitions."""
         for dec in node.decorator_list:
             if isinstance(dec, ast.Name) and dec.id == "dataclass":
                 self._add(
@@ -414,10 +384,7 @@ class _PythonASTValidator(ast.NodeVisitor):
                         law_ref="Law I.9 (Immutable Data Models)",
                         message=f"Class '{node.name}' @dataclass decorator must explicitly set frozen=True.",
                     )
-
-        self._scope_depth += 1
         self.generic_visit(node)
-        self._scope_depth -= 1
 
     def visit_Global(self, node: ast.Global) -> None:
         """Ban global statement."""
@@ -474,38 +441,8 @@ class _PythonASTValidator(ast.NodeVisitor):
                 )
         self.generic_visit(node)
 
-    def visit_Try(self, node: ast.Try) -> None:
-        """Track scope depth inside try blocks and validate handlers."""
-        self._scope_depth += 1
-        self.generic_visit(node)
-        self._scope_depth -= 1
-
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-        """Enforce Fail-Fast exception handling rules."""
-        if node.type is None:
-            self._add(
-                lineno=node.lineno,
-                rule_id="FAIL-FAST-BARE-EXCEPT",
-                law_ref="Law I.2 (Zero Silent Failures & No Bare Except)",
-                message="Bare 'except:' clause is strictly prohibited. Catch specific domain/runtime exceptions.",
-            )
-        elif isinstance(node.type, ast.Name) and node.type.id in BANNED_BROAD_EXCEPTIONS:
-            self._add(
-                lineno=node.lineno,
-                rule_id="FAIL-FAST-BARE-EXCEPT",
-                law_ref="Law I.2 (Zero Silent Failures & No Broad Exception)",
-                message=f"Catching broad '{node.type.id}' is strictly prohibited.",
-            )
-        elif isinstance(node.type, ast.Tuple):
-            for elt in node.type.elts:
-                if isinstance(elt, ast.Name) and elt.id in BANNED_BROAD_EXCEPTIONS:
-                    self._add(
-                        lineno=node.lineno,
-                        rule_id="FAIL-FAST-BARE-EXCEPT",
-                        law_ref="Law I.2 (Zero Silent Failures & No Broad Exception)",
-                        message=f"Catching broad '{elt.id}' inside exception tuple is prohibited.",
-                    )
-
+        """Require every except handler to re-raise or terminate execution."""
         has_raise_or_exit = False
         for child in ast.walk(node):
             if isinstance(child, ast.Raise):
@@ -532,7 +469,7 @@ class _PythonASTValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        """Validate function and method calls for fallbacks, NaN, globbing, and subprocess safety."""
+        """Check for fallback calls, NaN construction, filesystem globbing, and subprocess isolation."""
         if isinstance(node.func, ast.Name):
             if node.func.id == "getattr" and len(node.args) > 2:
                 self._add(
@@ -557,16 +494,32 @@ class _PythonASTValidator(ast.NodeVisitor):
 
         elif isinstance(node.func, ast.Attribute):
             attr_name = node.func.attr
-            if attr_name in BANNED_FALLBACK_METHODS:
+            if attr_name in ("setdefault", "getenv"):
                 self._add(
                     lineno=node.lineno,
                     rule_id="NO-FALLBACK-CALLS",
                     law_ref="Law I.3 (No Hidden Defaults or Fallbacks)",
                     message=(
-                        f"Method '.{attr_name}()' is prohibited because it introduces implicit fallback/default behavior. "
-                        "Use direct key indexing with explicit validation."
+                        f"Method '.{attr_name}()' is prohibited because it introduces implicit fallback/default behavior."
                     ),
                 )
+            elif attr_name == "get":
+                is_awaited = id(node) in self._awaited_calls
+                has_args = len(node.args) >= 1
+                has_http_kwargs = any(
+                    kw.arg in ("headers", "params", "timeout", "cookies")
+                    for kw in node.keywords
+                )
+                if not is_awaited and has_args and not has_http_kwargs:
+                    self._add(
+                        lineno=node.lineno,
+                        rule_id="NO-FALLBACK-CALLS",
+                        law_ref="Law I.3 (No Hidden Defaults or Fallbacks)",
+                        message=(
+                            "Dictionary '.get()' is prohibited because it masks missing keys with None/default. "
+                            "Use direct key indexing d[k] with explicit contract validation."
+                        ),
+                    )
             elif attr_name in BANNED_FS_HEURISTIC_METHODS:
                 self._add(
                     lineno=node.lineno,
@@ -590,90 +543,84 @@ class _PythonASTValidator(ast.NodeVisitor):
                             f"subprocess.{attr_name}() must explicitly specify both 'env=...' and 'timeout=...'"
                         ),
                     )
-                if attr_name == "run" and "check" not in kw_map:
-                    self._add(
-                        lineno=node.lineno,
-                        rule_id="SUBPROCESS-ISOLATION",
-                        law_ref="Law I.2 & I.7 (Explicit Subprocess Exit Code Policy)",
-                        message="subprocess.run() must explicitly specify 'check=...'",
-                    )
 
         self.generic_visit(node)
 
-    def visit_Attribute(self, node: ast.Attribute) -> None:
-        """Ban NaN attributes, st_mtime, and cross-object private attribute access."""
-        if node.attr.lower() == "nan" or node.attr == "NA":
-            self._add(
-                lineno=node.lineno,
-                rule_id="FAIL-FAST-NO-NAN",
-                law_ref="Law I.2 (No NaN Substitution)",
-                message=f"Accessing '{node.attr}' (NaN/NA constant) is strictly prohibited.",
-            )
-        if node.attr in ("st_mtime", "st_ctime", "st_mtime_ns"):
-            self._add(
-                lineno=node.lineno,
-                rule_id="NO-FS-GLOB-HEURISTICS",
-                law_ref="Law I.6 (No mtime Scanning)",
-                message=f"Reading '{node.attr}' for filesystem state heuristics is prohibited.",
-            )
-        if node.attr.startswith("_") and not node.attr.startswith("__"):
-            is_self_or_cls = isinstance(node.value, ast.Name) and node.value.id in (
-                "self",
-                "cls",
-            )
-            if not is_self_or_cls:
-                self._add(
-                    lineno=node.lineno,
-                    rule_id="NO-CROSS-MODULE-PRIVATE-ACCESS",
-                    law_ref="Law I.9 (Public API Boundary Contract)",
-                    message=(
-                        f"Accessing private attribute/method '{node.attr}' on an external object/module is prohibited."
-                    ),
-                )
-        self.generic_visit(node)
+    def _is_boolean_predicate(self, expr: ast.AST) -> bool:
+        """Return True if an AST expression is a pure boolean comparison or predicate."""
+        if isinstance(expr, ast.Compare):
+            return True
+        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+            return True
+        if isinstance(expr, ast.Call):
+            if isinstance(expr.func, ast.Name) and expr.func.id in (
+                "isinstance",
+                "issubclass",
+                "hasattr",
+                "any",
+                "all",
+                "bool",
+                "callable",
+            ):
+                return True
+            if isinstance(expr.func, ast.Attribute) and expr.func.attr in (
+                "startswith",
+                "endswith",
+                "isdigit",
+                "isalpha",
+                "isalnum",
+                "isspace",
+                "isupper",
+                "islower",
+                "exists",
+                "is_file",
+                "is_dir",
+                "is_absolute",
+                "match",
+            ):
+                return True
+        return False
 
     def _check_or_fallback_expr(self, expr: ast.AST) -> None:
-        """Flag value-fallback usage of boolean 'or' outside conditional tests."""
+        """Flag value-fallback usage of 'or' while permitting pure boolean expressions."""
         if isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.Or):
-            self._add(
-                lineno=expr.lineno,
-                rule_id="NO-FALLBACK-OR",
-                law_ref="Law I.3 (No Implicit 'or' Fallbacks)",
-                message=(
-                    "Using 'x or fallback' as a value expression is prohibited. "
-                    "Use explicit conditional branches and strict validation."
-                ),
+            all_predicates = all(
+                self._is_boolean_predicate(val) for val in expr.values
             )
+            if not all_predicates:
+                self._add(
+                    lineno=expr.lineno,
+                    rule_id="NO-FALLBACK-OR",
+                    law_ref="Law I.3 (No Implicit 'or' Fallbacks)",
+                    message=(
+                        "Using 'x or fallback' as a value fallback expression is prohibited. "
+                        "Use explicit conditional validation."
+                    ),
+                )
 
     def visit_Assign(self, node: ast.Assign) -> None:
-        """Check assignments for 'or' fallback patterns."""
+        """Check assignments for value-fallback 'or' expressions."""
         self._check_or_fallback_expr(node.value)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        """Check annotated assignments for types and 'or' fallback patterns."""
+        """Check annotated assignments for types and value-fallback 'or' expressions."""
         self._validate_type_annotation(node.annotation)
         if node.value is not None:
             self._check_or_fallback_expr(node.value)
         self.generic_visit(node)
 
     def visit_Return(self, node: ast.Return) -> None:
-        """Check return expressions for 'or' fallback patterns and NotImplemented."""
+        """Check return statements for value-fallback 'or' expressions."""
         if node.value is not None:
             self._check_or_fallback_expr(node.value)
-            if isinstance(node.value, ast.Name) and node.value.id == "NotImplemented":
-                self._add(
-                    lineno=node.lineno,
-                    rule_id="ZERO-STUBS-NOT-IMPLEMENTED",
-                    law_ref="Law I.8 (Zero Stubs)",
-                    message="Returning 'NotImplemented' is prohibited.",
-                )
         self.generic_visit(node)
 
 
 def validate_file_content(rel_path: str, content: str) -> list[RuleViolation]:
-    """Run all universal text and language-specific architectural checks on a file."""
+    """Run Ruff static analysis and strict AST architectural invariants on a file."""
     violations: list[RuleViolation] = []
+    violations.extend(validate_text_block_for_omissions(rel_path, "FILE", content))
 
     suffix = Path(rel_path).suffix.lower()
     first_line = content.splitlines()[0].strip() if content.splitlines() else ""
@@ -684,19 +631,24 @@ def validate_file_content(rel_path: str, content: str) -> list[RuleViolation]:
     )
 
     if is_python:
-        compiled_code = compile(
-            content,
-            filename=rel_path,
-            mode="exec",
-            flags=ast.PyCF_ONLY_AST,
-        )
-        tree: ast.Module = compiled_code
-        ast_validator = _PythonASTValidator(file_path=rel_path, source=content)
-        ast_validator.validate_tokens()
-        ast_validator.visit(tree)
-        violations.extend(ast_validator.violations)
-    else:
-        violations.extend(validate_text_block_for_omissions(rel_path, "FILE", content))
+        ruff_violations = _run_ruff_json_check(rel_path, content)
+        violations.extend(ruff_violations)
+
+        has_syntax_err = any(v.rule_id == "RUFF-SYNTAX" for v in ruff_violations)
+        if not has_syntax_err:
+            compiled_code = compile(
+                content,
+                filename=rel_path,
+                mode="exec",
+                flags=ast.PyCF_ONLY_AST,
+            )
+            tree: ast.Module = compiled_code
+            ast_checker = _StrictArchitecturalASTInvariants(
+                file_path=rel_path,
+                source=content,
+            )
+            ast_checker.visit(tree)
+            violations.extend(ast_checker.violations)
 
     return violations
 
@@ -727,17 +679,21 @@ def format_violation_report(
         out.append(sep_light)
         for st in op_statuses:
             icon = "✅" if st.passed else "❌"
-            out.append(f"  {icon} {st.op_type:<8} {st.rel_path} ({st.detail})")
+            out.append(f"  {icon} {st.op_type:<11} {st.rel_path} ({st.detail})")
         out.append(sep_light)
 
     out.append("")
 
     for file_path in sorted(grouped.keys()):
-        file_violations = sorted(grouped[file_path], key=lambda item: item.line_number)
+        file_violations = sorted(
+            grouped[file_path], key=lambda item: item.line_number
+        )
         out.append(f"File: {file_path} (Violations: {len(file_violations)})")
         out.append(sep_light)
         for v in file_violations:
-            out.append(f"  ❌ Line {v.line_number:<4} | [{v.rule_id}] {v.law_reference}")
+            out.append(
+                f"  ❌ Line {v.line_number:<4} | [{v.rule_id}] {v.law_reference}"
+            )
             out.append(f"     Code:    {v.code_snippet}")
             out.append(f"     Reason:  {v.message}")
             out.append("")

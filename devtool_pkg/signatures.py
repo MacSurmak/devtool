@@ -1,4 +1,4 @@
-"""Language-aware signature extractors for project skeleton views."""
+"""Language-aware signature and structural skeleton extractors for project views."""
 
 import ast
 import json
@@ -8,7 +8,9 @@ from typing import Final
 
 from devtool_pkg.constants import (
     MAX_BASH_SIGNATURES_LIMIT,
+    MAX_CLASS_FIELDS_LIMIT,
     MAX_CONFIG_KEYS_LIMIT,
+    MAX_IMPORTS_SUMMARY_LIMIT,
     MAX_MARKDOWN_HEADERS_LIMIT,
     MAX_SIGNATURES_LIMIT,
     SIGNATURE_REST_MAX_LEN,
@@ -32,7 +34,7 @@ BASH_SIG_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 
 def extract_python_signatures(content: str) -> list[str]:
-    """Extract top-level function and class method signatures from Python code."""
+    """Extract imports, typed constants, class fields, methods, and functions from Python code."""
     try:
         tree = ast.parse(content)
     except SyntaxError as exc:
@@ -41,38 +43,94 @@ def extract_python_signatures(content: str) -> list[str]:
         ) from exc
 
     sigs: list[str] = []
+    imported_modules: list[str] = []
+
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported_modules.append(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imported_modules.append(node.module)
+
+    if imported_modules:
+        unique_mods = list(dict.fromkeys(imported_modules))
+        shown_mods = ", ".join(unique_mods[:MAX_IMPORTS_SUMMARY_LIMIT])
+        suffix = (
+            f" (+{len(unique_mods) - MAX_IMPORTS_SUMMARY_LIMIT} more)"
+            if len(unique_mods) > MAX_IMPORTS_SUMMARY_LIMIT
+            else ""
+        )
+        sigs.append(f"[imports: {shown_mods}{suffix}]")
+
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            var_name = node.target.id
+            ann_str = ast.unparse(node.annotation)
+            sigs.append(f"const {var_name}: {ann_str}")
+
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.isupper():
+                    sigs.append(f"const {target.id}")
+
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             async_prefix = "async " if isinstance(node, ast.AsyncFunctionDef) else ""
             args_str = ast.unparse(node.args)
-            ret_str = f" -> {ast.unparse(node.returns)}" if node.returns is not None else ""
+            ret_str = (
+                f" -> {ast.unparse(node.returns)}"
+                if node.returns is not None
+                else ""
+            )
             sigs.append(f"{async_prefix}def {node.name}({args_str}){ret_str}")
 
         elif isinstance(node, ast.ClassDef):
+            decorators = [
+                f"@{ast.unparse(dec)}" for dec in node.decorator_list
+            ]
+            dec_prefix = f"{' '.join(decorators)} " if decorators else ""
             bases_str = (
                 f"({', '.join(ast.unparse(b) for b in node.bases)})"
                 if node.bases
                 else ""
             )
-            sigs.append(f"class {node.name}{bases_str}:")
+            sigs.append(f"{dec_prefix}class {node.name}{bases_str}:")
+
+            field_count = 0
             for sub in node.body:
-                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if (
+                    isinstance(sub, ast.AnnAssign)
+                    and isinstance(sub.target, ast.Name)
+                    and field_count < MAX_CLASS_FIELDS_LIMIT
+                ):
+                    f_name = sub.target.id
+                    f_type = ast.unparse(sub.annotation)
+                    sigs.append(f"  {f_name}: {f_type}")
+                    field_count += 1
+                elif isinstance(sub, ast.Assign) and len(sub.targets) == 1:
+                    target_node = sub.targets[0]
+                    if isinstance(target_node, ast.Name) and isinstance(
+                        sub.value, ast.Call
+                    ):
+                        if isinstance(
+                            sub.value.func, ast.Name
+                        ) and sub.value.func.id in ("Column", "Field", "relationship"):
+                            sigs.append(
+                                f"  {target_node.id} = {sub.value.func.id}(...)"
+                            )
+                            field_count += 1
+                elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    m_async = (
+                        "async " if isinstance(sub, ast.AsyncFunctionDef) else ""
+                    )
                     m_args = ast.unparse(sub.args)
                     m_ret = (
                         f" -> {ast.unparse(sub.returns)}"
                         if sub.returns is not None
                         else ""
                     )
-                    sigs.append(f"  def {sub.name}({m_args}){m_ret}")
-                elif isinstance(sub, ast.Assign) and len(sub.targets) == 1:
-                    target_node = sub.targets[0]
-                    if isinstance(target_node, ast.Name) and isinstance(sub.value, ast.Call):
-                        if isinstance(sub.value.func, ast.Name) and sub.value.func.id in (
-                            "Column",
-                            "Field",
-                        ):
-                            sigs.append(f"  {target_node.id} = {sub.value.func.id}(...)")
-    return sigs
+                    sigs.append(f"  {m_async}def {sub.name}({m_args}){m_ret}")
+
+    return sigs[:MAX_SIGNATURES_LIMIT]
 
 
 def extract_nextflow_signatures(content: str) -> list[str]:
@@ -122,7 +180,9 @@ def extract_go_rust_signatures(content: str) -> list[str]:
     for match in GO_RUST_SIG_PATTERN.finditer(content):
         pub, kind, name, rest = match.groups()
         pub_str = "pub " if pub else ""
-        sigs.append(f"{pub_str}{kind} {name}{rest.strip()[:SIGNATURE_REST_MAX_LEN]}")
+        sigs.append(
+            f"{pub_str}{kind} {name}{rest.strip()[:SIGNATURE_REST_MAX_LEN]}"
+        )
     return sigs[:MAX_SIGNATURES_LIMIT]
 
 
@@ -145,15 +205,17 @@ def extract_config_signatures(path: Path, content: str) -> list[str]:
             return [f"keys: [{', '.join(keys[:MAX_CONFIG_KEYS_LIMIT])}]"]
     elif ext == ".json":
         try:
-            parsed: dict[str, str | int | float | bool | None] | list[str] = json.loads(
-                content
+            parsed: dict[str, str | int | float | bool | None] | list[str] = (
+                json.loads(content)
             )
         except json.JSONDecodeError as exc:
             raise ConfigurationError(
                 f"Invalid JSON in '{path}': {exc.msg} at line {exc.lineno}"
             ) from exc
         if isinstance(parsed, dict):
-            str_keys = [str(k) for k in list(parsed.keys())[:MAX_CONFIG_KEYS_LIMIT]]
+            str_keys = [
+                str(k) for k in list(parsed.keys())[:MAX_CONFIG_KEYS_LIMIT]
+            ]
             return [f"keys: [{', '.join(str_keys)}]"]
     elif ext == ".toml":
         sections = [

@@ -158,9 +158,6 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
                 replace_op=rep_op,
             )
         )
-        violations.extend(
-            validate_text_block_for_omissions(f_name, "REPLACE", replace_b)
-        )
         stripped_search = search_b.strip()
         stripped_replace = replace_b.strip()
         if not stripped_search:
@@ -461,8 +458,25 @@ def apply_patch(
                 else len(file_violations)
             )
 
+    op_totals_per_file: dict[tuple[str, str], int] = {}
+    for op_type, rel_p, _, _ in preliminary_statuses:
+        key = (op_type, rel_p)
+        op_totals_per_file[key] = (
+            op_totals_per_file[key] + 1 if key in op_totals_per_file else 1
+        )
+
+    op_seen_counts: dict[tuple[str, str], int] = {}
     final_statuses: list[OperationStatus] = []
     for op_type, rel_p, stage_ok, stage_detail in preliminary_statuses:
+        key = (op_type, rel_p)
+        current_idx = op_seen_counts[key] + 1 if key in op_seen_counts else 1
+        op_seen_counts[key] = current_idx
+        label_type = (
+            f"{op_type} #{current_idx}"
+            if op_totals_per_file[key] > 1
+            else op_type
+        )
+
         v_count = (
             per_file_violation_counts[rel_p]
             if rel_p in per_file_violation_counts
@@ -471,7 +485,7 @@ def apply_patch(
         if not stage_ok:
             final_statuses.append(
                 OperationStatus(
-                    op_type=op_type,
+                    op_type=label_type,
                     rel_path=rel_p,
                     passed=False,
                     detail=stage_detail,
@@ -480,16 +494,16 @@ def apply_patch(
         elif v_count > 0:
             final_statuses.append(
                 OperationStatus(
-                    op_type=op_type,
+                    op_type=label_type,
                     rel_path=rel_p,
                     passed=False,
-                    detail=f"{stage_detail}, architectural violations: {v_count}",
+                    detail=f"{stage_detail}, file violations: {v_count}",
                 )
             )
         else:
             final_statuses.append(
                 OperationStatus(
-                    op_type=op_type,
+                    op_type=label_type,
                     rel_path=rel_p,
                     passed=True,
                     detail=f"{stage_detail}, 0 violations",
@@ -508,7 +522,7 @@ def apply_patch(
     print("─" * 76)
     for st in final_statuses:
         icon = "✅" if st.passed else "❌"
-        print(f"  {icon} {st.op_type:<8} {st.rel_path} ({st.detail})")
+        print(f"  {icon} {st.op_type:<11} {st.rel_path} ({st.detail})")
     print("─" * 76)
 
     for rel_p in sorted(deleted_paths):
