@@ -701,8 +701,11 @@ def validate_file_content(rel_path: str, content: str) -> list[RuleViolation]:
     return violations
 
 
-def format_violation_report(violations: list[RuleViolation]) -> str:
-    """Format a comprehensive, copy-paste-ready rejection report grouped by file."""
+def format_violation_report(
+    violations: list[RuleViolation],
+    op_statuses: list[OperationStatus],
+) -> str:
+    """Format a comprehensive, copy-paste-ready rejection report with ordered block summary."""
     grouped: dict[str, list[RuleViolation]] = {}
     for v in violations:
         if v.file_path not in grouped:
@@ -716,8 +719,18 @@ def format_violation_report(violations: list[RuleViolation]) -> str:
         f"🚨 PATCH REJECTED: ARCHITECTURAL & STRUCTURAL VIOLATIONS DETECTED (Total: {len(violations)})",
         "All-or-Nothing Rollback: Zero files on disk were modified.",
         sep_heavy,
-        "",
     ]
+
+    if op_statuses:
+        out.append("")
+        out.append("📋 Patch Operations Summary (in patch order):")
+        out.append(sep_light)
+        for st in op_statuses:
+            icon = "✅" if st.passed else "❌"
+            out.append(f"  {icon} {st.op_type:<8} {st.rel_path} ({st.detail})")
+        out.append(sep_light)
+
+    out.append("")
 
     for file_path in sorted(grouped.keys()):
         file_violations = sorted(grouped[file_path], key=lambda item: item.line_number)

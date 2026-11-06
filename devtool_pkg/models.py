@@ -73,6 +73,28 @@ class RuleViolation:
 
 
 @dataclass(frozen=True)
+class OperationStatus:
+    """Status of a single patch block operation in patch-appearance order."""
+
+    op_type: str
+    rel_path: str
+    passed: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class OrderedPatchOp:
+    """Wrapper preserving the exact sequential position of an operation in the patch."""
+
+    position: int
+    op_type: str
+    rel_path: str
+    create_op: CreateOp | None
+    delete_op: DeleteOp | None
+    replace_op: ReplaceOp | None
+
+
+@dataclass(frozen=True)
 class ParsedPatch:
     """Parsed representation of a devtool patch block."""
 
@@ -80,4 +102,5 @@ class ParsedPatch:
     creates: tuple[CreateOp, ...]
     deletes: tuple[DeleteOp, ...]
     replaces: tuple[ReplaceOp, ...]
+    ordered_ops: tuple[OrderedPatchOp, ...]
     structural_violations: tuple[RuleViolation, ...]

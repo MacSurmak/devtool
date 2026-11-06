@@ -25,6 +25,8 @@ from devtool_pkg.models import (
     CreateOp,
     DeleteOp,
     DevtoolConfig,
+    OperationStatus,
+    OrderedPatchOp,
     ParsedPatch,
     ReplaceOp,
     RuleViolation,
@@ -68,6 +70,7 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
             creates=(),
             deletes=(),
             replaces=(),
+            ordered_ops=(),
             structural_violations=tuple(violations),
         )
 
@@ -89,18 +92,39 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
         commit_msg = commit_match.group(1).strip()
         violations.extend(validate_commit_message(commit_msg))
 
-    deletes: list[DeleteOp] = [
-        DeleteOp(rel_path=raw_del.strip())
-        for raw_del in DELETE_PATTERN.findall(patch_text)
-    ]
+    raw_ordered: list[OrderedPatchOp] = []
+
+    deletes: list[DeleteOp] = []
+    for match in DELETE_PATTERN.finditer(patch_text):
+        del_op = DeleteOp(rel_path=match.group(1).strip())
+        deletes.append(del_op)
+        raw_ordered.append(
+            OrderedPatchOp(
+                position=match.start(),
+                op_type="DELETE",
+                rel_path=del_op.rel_path,
+                create_op=None,
+                delete_op=del_op,
+                replace_op=None,
+            )
+        )
 
     creates: list[CreateOp] = []
     for match in CREATE_PATTERN.finditer(patch_text):
         f_name = match.group(1).strip()
         content = match.group(2)
         end_tag = match.group(3).strip()
-        creates.append(
-            CreateOp(rel_path=f_name, content=content, closing_tag=end_tag)
+        create_op = CreateOp(rel_path=f_name, content=content, closing_tag=end_tag)
+        creates.append(create_op)
+        raw_ordered.append(
+            OrderedPatchOp(
+                position=match.start(),
+                op_type="CREATE",
+                rel_path=f_name,
+                create_op=create_op,
+                delete_op=None,
+                replace_op=None,
+            )
         )
         if end_tag != "CREATE":
             violations.append(
@@ -119,11 +143,20 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
         f_name = match.group(1).strip()
         search_b = match.group(2)
         replace_b = match.group(3)
-        replaces.append(
-            ReplaceOp(
+        rep_op = ReplaceOp(
+            rel_path=f_name,
+            search_block=search_b,
+            replace_block=replace_b,
+        )
+        replaces.append(rep_op)
+        raw_ordered.append(
+            OrderedPatchOp(
+                position=match.start(),
+                op_type="REPLACE",
                 rel_path=f_name,
-                search_block=search_b,
-                replace_block=replace_b,
+                create_op=None,
+                delete_op=None,
+                replace_op=rep_op,
             )
         )
         violations.extend(
@@ -217,11 +250,13 @@ def parse_patch_text(patch_text: str) -> ParsedPatch:
             )
         )
 
+    sorted_ops = tuple(sorted(raw_ordered, key=lambda item: item.position))
     return ParsedPatch(
         commit_message=commit_msg,
         creates=tuple(creates),
         deletes=tuple(deletes),
         replaces=tuple(replaces),
+        ordered_ops=sorted_ops,
         structural_violations=tuple(violations),
     )
 
@@ -273,103 +308,197 @@ def apply_patch(
     all_violations: list[RuleViolation] = list(parsed.structural_violations)
     staged_files: dict[str, str] = {}
     deleted_paths: set[str] = set()
+    preliminary_statuses: list[tuple[str, str, bool, str]] = []
 
-    for del_op in parsed.deletes:
-        target = resolve_path(del_op.rel_path, ws.root)
-        if not target.exists():
-            all_violations.append(
-                RuleViolation(
-                    file_path=del_op.rel_path,
-                    line_number=1,
-                    rule_id="PATCH-TARGET-MISSING",
-                    law_reference="Section III.3 (No Blind Patches)",
-                    code_snippet=f"DELETE: {del_op.rel_path}",
-                    message=f"Cannot delete '{del_op.rel_path}': file does not exist on disk.",
-                )
-            )
-        else:
-            deleted_paths.add(del_op.rel_path)
-
-    for create_op in parsed.creates:
-        content = create_op.content
-        if content and not content.endswith("\n"):
-            content += "\n"
-        staged_files[create_op.rel_path] = content
-        if create_op.rel_path in deleted_paths:
-            deleted_paths.remove(create_op.rel_path)
-
-    for rep_op in parsed.replaces:
-        rel_p = rep_op.rel_path
-        if rel_p not in staged_files:
+    for item in parsed.ordered_ops:
+        rel_p = item.rel_path
+        if item.op_type == "DELETE" and item.delete_op is not None:
             target = resolve_path(rel_p, ws.root)
-            if not target.exists() or rel_p in deleted_paths:
+            if not target.exists():
                 all_violations.append(
                     RuleViolation(
                         file_path=rel_p,
                         line_number=1,
                         rule_id="PATCH-TARGET-MISSING",
                         law_reference="Section III.3 (No Blind Patches)",
-                        code_snippet=f"SEARCH: {rel_p}",
-                        message=f"Target file '{rel_p}' does not exist for SEARCH/REPLACE.",
+                        code_snippet=f"DELETE: {rel_p}",
+                        message=f"Cannot delete '{rel_p}': file does not exist on disk.",
                     )
                 )
-                continue
-            staged_files[rel_p] = target.read_text(encoding="utf-8").replace(
-                "\r\n", "\n"
+                preliminary_statuses.append(
+                    ("DELETE", rel_p, False, "file does not exist")
+                )
+            else:
+                deleted_paths.add(rel_p)
+                if rel_p in staged_files:
+                    del staged_files[rel_p]
+                preliminary_statuses.append(("DELETE", rel_p, True, "target found"))
+
+        elif item.op_type == "CREATE" and item.create_op is not None:
+            content = item.create_op.content
+            if content and not content.endswith("\n"):
+                content += "\n"
+            staged_files[rel_p] = content
+            if rel_p in deleted_paths:
+                deleted_paths.remove(rel_p)
+            if item.create_op.closing_tag != "CREATE":
+                preliminary_statuses.append(
+                    (
+                        "CREATE",
+                        rel_p,
+                        False,
+                        f"invalid closing tag '{CLOSE_MARK} {item.create_op.closing_tag}'",
+                    )
+                )
+            else:
+                preliminary_statuses.append(("CREATE", rel_p, True, "staged in memory"))
+
+        elif item.op_type == "REPLACE" and item.replace_op is not None:
+            rep_op = item.replace_op
+            if rel_p not in staged_files:
+                target = resolve_path(rel_p, ws.root)
+                if not target.exists() or rel_p in deleted_paths:
+                    all_violations.append(
+                        RuleViolation(
+                            file_path=rel_p,
+                            line_number=1,
+                            rule_id="PATCH-TARGET-MISSING",
+                            law_reference="Section III.3 (No Blind Patches)",
+                            code_snippet=f"SEARCH: {rel_p}",
+                            message=f"Target file '{rel_p}' does not exist for SEARCH/REPLACE.",
+                        )
+                    )
+                    preliminary_statuses.append(
+                        ("REPLACE", rel_p, False, "file does not exist")
+                    )
+                    continue
+                staged_files[rel_p] = target.read_text(encoding="utf-8").replace(
+                    "\r\n", "\n"
+                )
+
+            current_text = staged_files[rel_p]
+            occurrences = current_text.count(rep_op.search_block)
+            first_search_line = (
+                rep_op.search_block.strip().splitlines()[0]
+                if rep_op.search_block.strip()
+                else "<empty search>"
             )
 
-        current_text = staged_files[rel_p]
-        occurrences = current_text.count(rep_op.search_block)
-        first_search_line = (
-            rep_op.search_block.strip().splitlines()[0]
-            if rep_op.search_block.strip()
-            else "<empty search>"
+            if occurrences == 0:
+                all_violations.append(
+                    RuleViolation(
+                        file_path=rel_p,
+                        line_number=1,
+                        rule_id="PATCH-SEARCH-NOT-FOUND",
+                        law_reference="Section III.3 (Exact SEARCH Match Requirement)",
+                        code_snippet=first_search_line,
+                        message=f"Exact SEARCH block was not found in '{rel_p}'.",
+                    )
+                )
+                preliminary_statuses.append(
+                    ("REPLACE", rel_p, False, "exact SEARCH block not found")
+                )
+            elif occurrences > 1:
+                all_violations.append(
+                    RuleViolation(
+                        file_path=rel_p,
+                        line_number=1,
+                        rule_id="PATCH-SEARCH-AMBIGUOUS",
+                        law_reference="Section III.3 (Absolute Uniqueness of SEARCH)",
+                        code_snippet=first_search_line,
+                        message=(
+                            f"SEARCH block matches {occurrences} locations in '{rel_p}'. "
+                            "Provide more surrounding context so it matches exactly once."
+                        ),
+                    )
+                )
+                preliminary_statuses.append(
+                    (
+                        "REPLACE",
+                        rel_p,
+                        False,
+                        f"ambiguous SEARCH block ({occurrences} matches)",
+                    )
+                )
+            else:
+                updated_text = current_text.replace(
+                    rep_op.search_block, rep_op.replace_block, 1
+                )
+                if updated_text and not updated_text.endswith("\n"):
+                    updated_text += "\n"
+                staged_files[rel_p] = updated_text
+                preliminary_statuses.append(
+                    ("REPLACE", rel_p, True, "100% exact match")
+                )
+
+    per_file_violation_counts: dict[str, int] = {}
+    for v in all_violations:
+        base_file = v.file_path.split(" (")[0]
+        per_file_violation_counts[base_file] = (
+            per_file_violation_counts[base_file] + 1
+            if base_file in per_file_violation_counts
+            else 1
         )
-
-        if occurrences == 0:
-            all_violations.append(
-                RuleViolation(
-                    file_path=rel_p,
-                    line_number=1,
-                    rule_id="PATCH-SEARCH-NOT-FOUND",
-                    law_reference="Section III.3 (Exact SEARCH Match Requirement)",
-                    code_snippet=first_search_line,
-                    message=f"Exact SEARCH block was not found in '{rel_p}'.",
-                )
-            )
-        elif occurrences > 1:
-            all_violations.append(
-                RuleViolation(
-                    file_path=rel_p,
-                    line_number=1,
-                    rule_id="PATCH-SEARCH-AMBIGUOUS",
-                    law_reference="Section III.3 (Absolute Uniqueness of SEARCH)",
-                    code_snippet=first_search_line,
-                    message=(
-                        f"SEARCH block matches {occurrences} locations in '{rel_p}'. "
-                        "Provide more surrounding context so it matches exactly once."
-                    ),
-                )
-            )
-        else:
-            updated_text = current_text.replace(
-                rep_op.search_block, rep_op.replace_block, 1
-            )
-            if updated_text and not updated_text.endswith("\n"):
-                updated_text += "\n"
-            staged_files[rel_p] = updated_text
 
     for rel_p, final_content in staged_files.items():
         file_violations = validate_file_content(rel_p, final_content)
         all_violations.extend(file_violations)
+        if file_violations:
+            per_file_violation_counts[rel_p] = (
+                per_file_violation_counts[rel_p] + len(file_violations)
+                if rel_p in per_file_violation_counts
+                else len(file_violations)
+            )
+
+    final_statuses: list[OperationStatus] = []
+    for op_type, rel_p, stage_ok, stage_detail in preliminary_statuses:
+        v_count = (
+            per_file_violation_counts[rel_p]
+            if rel_p in per_file_violation_counts
+            else 0
+        )
+        if not stage_ok:
+            final_statuses.append(
+                OperationStatus(
+                    op_type=op_type,
+                    rel_path=rel_p,
+                    passed=False,
+                    detail=stage_detail,
+                )
+            )
+        elif v_count > 0:
+            final_statuses.append(
+                OperationStatus(
+                    op_type=op_type,
+                    rel_path=rel_p,
+                    passed=False,
+                    detail=f"{stage_detail}, architectural violations: {v_count}",
+                )
+            )
+        else:
+            final_statuses.append(
+                OperationStatus(
+                    op_type=op_type,
+                    rel_path=rel_p,
+                    passed=True,
+                    detail=f"{stage_detail}, 0 violations",
+                )
+            )
 
     if all_violations:
-        report_text = format_violation_report(all_violations)
+        report_text = format_violation_report(all_violations, final_statuses)
         ws.ai_dir.mkdir(parents=True, exist_ok=True)
         ws.validation_report.write_text(report_text + "\n", encoding="utf-8")
         raise PatchRejectedError(
             f"{report_text}\n\n📄 Full rejection report saved to: {ws.validation_report}"
         )
+
+    print("\n🔍 Patch validation & staging summary (in patch order):")
+    print("─" * 76)
+    for st in final_statuses:
+        icon = "✅" if st.passed else "❌"
+        print(f"  {icon} {st.op_type:<8} {st.rel_path} ({st.detail})")
+    print("─" * 76)
 
     for rel_p in sorted(deleted_paths):
         target = resolve_path(rel_p, ws.root)
@@ -450,7 +579,7 @@ def validate_existing_files(targets: list[str]) -> None:
         all_violations.extend(validate_file_content(rel_str, content))
 
     if all_violations:
-        report_text = format_violation_report(all_violations)
+        report_text = format_violation_report(all_violations, [])
         ws.ai_dir.mkdir(parents=True, exist_ok=True)
         ws.validation_report.write_text(report_text + "\n", encoding="utf-8")
         raise PatchRejectedError(
