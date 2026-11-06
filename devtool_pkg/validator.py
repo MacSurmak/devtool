@@ -658,7 +658,13 @@ def format_violation_report(
                 f"  ❌ Line {v.line_number:<4} | [{v.rule_id}] {v.law_reference}"
             )
             out.append(f"     Code:    {v.code_snippet}")
-            out.append(f"     Reason:  {v.message}")
+            if "\n" in v.message:
+                msg_lines = v.message.splitlines()
+                out.append(f"     Reason:  {msg_lines[0]}")
+                for diff_ln in msg_lines[1:]:
+                    out.append(diff_ln)
+            else:
+                out.append(f"     Reason:  {v.message}")
             out.append("")
 
     out.append(sep_heavy)

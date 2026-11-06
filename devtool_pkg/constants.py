@@ -31,6 +31,20 @@ RUFF_SELECT_RULES: Final[str] = (
     "SLF001,PLW1510,B006,B007,B008,TRY201,TRY302"
 )
 
+FILE_WIDE_FATAL_RULES: Final[frozenset[str]] = frozenset(
+    {
+        "RUFF-SYNTAX",
+        "RUFF-F821",
+        "RUFF-F822",
+        "RUFF-F823",
+        "RUFF-F406",
+        "RUFF-F701",
+        "RUFF-F702",
+        "RUFF-F704",
+        "RUFF-F706",
+    }
+)
+
 OPEN_MARK: Final[str] = "<" * 7
 SEP_MARK: Final[str] = "=" * 7
 CLOSE_MARK: Final[str] = ">" * 7

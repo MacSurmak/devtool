@@ -1,5 +1,6 @@
 """Transactional all-or-nothing patch parser, in-memory staging, and git manager."""
 
+import difflib
 from pathlib import Path
 
 from devtool_pkg.constants import (
@@ -10,6 +11,7 @@ from devtool_pkg.constants import (
     DEFAULT_DUMPIGNORE_TEMPLATE,
     DEFAULT_GITIGNORE_TEMPLATE,
     DELETE_PATTERN,
+    FILE_WIDE_FATAL_RULES,
     HEADER_CREATE_PATTERN,
     HEADER_DELETE_PATTERN,
     HEADER_SEARCH_PATTERN,
@@ -46,6 +48,93 @@ from devtool_pkg.validator import (
     validate_commit_message,
     validate_file_content,
 )
+
+
+def _build_search_mismatch_diff(
+    file_path: str,
+    content: str,
+    search_block: str,
+) -> tuple[int, str]:
+    """Find the closest matching slice in content and build a unified diff diagnostic."""
+    search_lines = search_block.splitlines()
+    search_stripped = [ln.strip() for ln in search_lines if ln.strip()]
+    if not search_stripped:
+        return 1, "SEARCH block is empty."
+
+    content_lines = content.splitlines()
+    if not content_lines:
+        return 1, f"File '{file_path}' is empty."
+
+    content_stripped = [ln.strip() for ln in content_lines]
+    target_len = len(search_lines)
+
+    best_ratio = 0.0
+    best_slice = (0, min(len(content_lines), target_len))
+
+    anchor_line = search_stripped[0]
+    candidate_starts: list[int] = [
+        idx
+        for idx, c_ln in enumerate(content_stripped)
+        if c_ln == anchor_line or (len(anchor_line) >= 6 and anchor_line in c_ln)
+    ]
+
+    margin = max(3, target_len // 4)
+    min_win = max(1, target_len - margin)
+    max_win = min(len(content_lines), target_len + margin + 1)
+
+    search_joined = "\n".join(search_stripped)
+
+    if candidate_starts:
+        for start_idx in candidate_starts:
+            for win in range(min_win, max_win + 1):
+                end_idx = min(len(content_lines), start_idx + win)
+                chunk_joined = "\n".join(
+                    ln for ln in content_stripped[start_idx:end_idx] if ln
+                )
+                ratio = difflib.SequenceMatcher(
+                    None, search_joined, chunk_joined
+                ).ratio()
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_slice = (start_idx, end_idx)
+    else:
+        step = 1 if len(content_lines) <= 400 else 2
+        for start_idx in range(0, max(1, len(content_lines) - min_win + 1), step):
+            end_idx = min(len(content_lines), start_idx + target_len)
+            chunk_joined = "\n".join(
+                ln for ln in content_stripped[start_idx:end_idx] if ln
+            )
+            ratio = difflib.SequenceMatcher(
+                None, search_joined, chunk_joined
+            ).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_slice = (start_idx, end_idx)
+
+    start_line_1based = best_slice[0] + 1
+    end_line_1based = best_slice[1]
+    if best_ratio < 0.25:
+        return (
+            1,
+            f"Exact SEARCH block was not found in '{file_path}' (no similar block above 25% similarity).",
+        )
+
+    actual_slice_lines = content_lines[best_slice[0] : best_slice[1]]
+    diff_iter = difflib.unified_diff(
+        search_lines,
+        actual_slice_lines,
+        fromfile="EXPECTED BY PATCH (SEARCH)",
+        tofile=f"ACTUAL IN FILE ({file_path}:{start_line_1based}..{end_line_1based})",
+        lineterm="",
+    )
+    diff_text = "\n".join(f"     {dl}" for dl in diff_iter)
+    pct = round(best_ratio * 100, 1)
+    msg = (
+        f"Exact SEARCH block was not found in '{file_path}'. "
+        f"Closest match at lines {start_line_1based}..{end_line_1based} (similarity: {pct}%):\n"
+        f"{diff_text}"
+    )
+    return start_line_1based, msg
 
 
 def parse_patch_text(patch_text: str) -> ParsedPatch:
@@ -392,18 +481,26 @@ def apply_patch(
             )
 
             if occurrences == 0:
+                approx_line, diff_msg = _build_search_mismatch_diff(
+                    rel_p, current_text, rep_op.search_block
+                )
                 all_violations.append(
                     RuleViolation(
                         file_path=rel_p,
-                        line_number=1,
+                        line_number=approx_line,
                         rule_id="PATCH-SEARCH-NOT-FOUND",
                         law_reference="Section III.3 (Exact SEARCH Match Requirement)",
                         code_snippet=first_search_line,
-                        message=f"Exact SEARCH block was not found in '{rel_p}'.",
+                        message=diff_msg,
                     )
                 )
                 preliminary_statuses.append(
-                    ("REPLACE", rel_p, False, "exact SEARCH block not found")
+                    (
+                        "REPLACE",
+                        rel_p,
+                        False,
+                        f"exact SEARCH block not found (closest near line {approx_line})",
+                    )
                 )
             elif occurrences > 1:
                 all_violations.append(
@@ -495,8 +592,7 @@ def apply_patch(
                     )
                     break
 
-            if matched_block_label or fv.rule_id == "RUFF-SYNTAX":
-                tag = matched_block_label if matched_block_label else "FILE-SYNTAX"
+            if matched_block_label:
                 all_violations.append(
                     RuleViolation(
                         file_path=fv.file_path,
@@ -504,7 +600,18 @@ def apply_patch(
                         rule_id=fv.rule_id,
                         law_reference=fv.law_reference,
                         code_snippet=fv.code_snippet,
-                        message=f"[INSIDE {tag}] {fv.message}",
+                        message=f"[INSIDE {matched_block_label}] {fv.message}",
+                    )
+                )
+            elif fv.rule_id in FILE_WIDE_FATAL_RULES:
+                all_violations.append(
+                    RuleViolation(
+                        file_path=fv.file_path,
+                        line_number=fv.line_number,
+                        rule_id=fv.rule_id,
+                        law_reference=fv.law_reference,
+                        code_snippet=fv.code_snippet,
+                        message=f"[BROKEN REFERENCE IN FILE OUTSIDE PATCH BLOCKS] {fv.message}",
                     )
                 )
             else:
@@ -515,19 +622,19 @@ def apply_patch(
                         rule_id=fv.rule_id,
                         law_reference=fv.law_reference,
                         code_snippet=fv.code_snippet,
-                        message=f"[UNTOUCHED LEGACY CODE] {fv.message}",
+                        message=fv.message,
                     )
                 )
 
-    structural_by_file: dict[str, int] = {}
-    for sv in parsed.structural_violations:
-        base_f = sv.file_path.split(" (")[0]
-        structural_by_file[base_f] = (
-            structural_by_file[base_f] + 1 if base_f in structural_by_file else 1
-        )
+    fatal_outside_by_file: dict[str, list[int]] = {}
+    for av in all_violations:
+        if av.message.startswith("[BROKEN REFERENCE IN FILE OUTSIDE PATCH BLOCKS]"):
+            if av.file_path not in fatal_outside_by_file:
+                fatal_outside_by_file[av.file_path] = []
+            fatal_outside_by_file[av.file_path].append(av.line_number)
 
     final_statuses: list[OperationStatus] = []
-    for label_type, rel_p, stage_ok, stage_detail, _ in numbered_ops:
+    for label_type, rel_p, stage_ok, stage_detail, ord_op in numbered_ops:
         rng = (
             block_line_ranges[(label_type, rel_p)]
             if (label_type, rel_p) in block_line_ranges
@@ -539,9 +646,12 @@ def apply_patch(
             if (label_type, rel_p) in in_block_counts
             else 0
         )
-        s_count = (
-            structural_by_file[rel_p] if rel_p in structural_by_file else 0
-        )
+        is_non_idempotent = False
+        if ord_op.replace_op is not None:
+            s_strip = ord_op.replace_op.search_block.strip()
+            r_strip = ord_op.replace_op.replace_block.strip()
+            if not s_strip or s_strip in r_strip:
+                is_non_idempotent = True
 
         if not stage_ok:
             final_statuses.append(
@@ -552,14 +662,22 @@ def apply_patch(
                     detail=stage_detail,
                 )
             )
-        elif b_count > 0 or s_count > 0:
-            total_err = b_count + s_count
+        elif is_non_idempotent:
             final_statuses.append(
                 OperationStatus(
                     op_type=label_type,
                     rel_path=rel_p,
                     passed=False,
-                    detail=f"{range_str}{stage_detail}, {total_err} blocking violation(s) in patch",
+                    detail=f"{range_str}{stage_detail}, non-idempotent SEARCH in REPLACE",
+                )
+            )
+        elif b_count > 0:
+            final_statuses.append(
+                OperationStatus(
+                    op_type=label_type,
+                    rel_path=rel_p,
+                    passed=False,
+                    detail=f"{range_str}{stage_detail}, {b_count} blocking violation(s) in block",
                 )
             )
         else:
@@ -571,6 +689,18 @@ def apply_patch(
                     detail=f"{range_str}{stage_detail}, 0 violations in block",
                 )
             )
+
+    for rel_p, broken_lines in sorted(fatal_outside_by_file.items()):
+        uniq_b = sorted(set(broken_lines))
+        b_preview = ", ".join(str(x) for x in uniq_b[:10])
+        final_statuses.append(
+            OperationStatus(
+                op_type="FILE-WIDE",
+                rel_path=rel_p,
+                passed=False,
+                detail=f"{len(broken_lines)} broken symbol/syntax error(s) on untouched lines [{b_preview}]",
+            )
+        )
 
     if all_violations:
         report_text = format_violation_report(all_violations, final_statuses)
@@ -588,20 +718,17 @@ def apply_patch(
     print("─" * 76)
 
     if legacy_warnings:
-        warn_by_file: dict[str, list[int]] = {}
-        for lw in legacy_warnings:
-            if lw.file_path not in warn_by_file:
-                warn_by_file[lw.file_path] = []
-            warn_by_file[lw.file_path].append(lw.line_number)
         print(
             f"\n⚠️  Non-blocking legacy warnings outside patch blocks ({len(legacy_warnings)} total):"
         )
-        for wf, wlines in sorted(warn_by_file.items()):
-            uniq_w = sorted(set(wlines))
-            preview = ", ".join(str(x) for x in uniq_w[:12])
-            if len(uniq_w) > 12:
-                preview += f" (+{len(uniq_w) - 12} more)"
-            print(f"   • {wf}: {len(wlines)} warning(s) on untouched lines [{preview}]")
+        for lw in legacy_warnings[:15]:
+            print(
+                f"   • {lw.file_path}:{lw.line_number} [{lw.rule_id}] {lw.message} -> `{lw.code_snippet}`"
+            )
+        if len(legacy_warnings) > 15:
+            print(
+                f"   ... and {len(legacy_warnings) - 15} more legacy warning(s) (run `devtool check` for full list)."
+            )
         print()
 
     for rel_p in sorted(deleted_paths):
