@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Final
 
-from devtool_pkg.models import RuleViolation
+from devtool_pkg.models import OperationStatus, RuleViolation
 
 CYRILLIC_PATTERN: Final[re.Pattern[str]] = re.compile(r"[а-яА-ЯёЁ]")
 SUPPRESSION_PATTERN: Final[re.Pattern[str]] = re.compile(
