@@ -10,7 +10,6 @@ from devtool_pkg.constants import (
     MAX_BASH_SIGNATURES_LIMIT,
     MAX_CLASS_FIELDS_LIMIT,
     MAX_CONFIG_KEYS_LIMIT,
-    MAX_IMPORTS_SUMMARY_LIMIT,
     MAX_MARKDOWN_HEADERS_LIMIT,
     MAX_SIGNATURES_LIMIT,
     SIGNATURE_REST_MAX_LEN,
@@ -54,13 +53,8 @@ def extract_python_signatures(content: str) -> list[str]:
 
     if imported_modules:
         unique_mods = list(dict.fromkeys(imported_modules))
-        shown_mods = ", ".join(unique_mods[:MAX_IMPORTS_SUMMARY_LIMIT])
-        suffix = (
-            f" (+{len(unique_mods) - MAX_IMPORTS_SUMMARY_LIMIT} more)"
-            if len(unique_mods) > MAX_IMPORTS_SUMMARY_LIMIT
-            else ""
-        )
-        sigs.append(f"[imports: {shown_mods}{suffix}]")
+        shown_mods = ", ".join(unique_mods)
+        sigs.append(f"[imports: {shown_mods}]")
 
     for node in tree.body:
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
@@ -106,16 +100,20 @@ def extract_python_signatures(content: str) -> list[str]:
                     f_type = ast.unparse(sub.annotation)
                     sigs.append(f"  {f_name}: {f_type}")
                     field_count += 1
-                elif isinstance(sub, ast.Assign) and len(sub.targets) == 1:
+                elif (
+                    isinstance(sub, ast.Assign)
+                    and len(sub.targets) == 1
+                    and field_count < MAX_CLASS_FIELDS_LIMIT
+                ):
                     target_node = sub.targets[0]
-                    if isinstance(target_node, ast.Name) and isinstance(
-                        sub.value, ast.Call
-                    ):
-                        if isinstance(
-                            sub.value.func, ast.Name
-                        ) and sub.value.func.id in ("Column", "Field", "relationship"):
+                    if isinstance(target_node, ast.Name):
+                        if isinstance(sub.value, ast.Call):
+                            func_label = ast.unparse(sub.value.func)
+                            sigs.append(f"  {target_node.id} = {func_label}(...)")
+                            field_count += 1
+                        elif isinstance(sub.value, ast.Constant):
                             sigs.append(
-                                f"  {target_node.id} = {sub.value.func.id}(...)"
+                                f"  {target_node.id} = {ast.unparse(sub.value)}"
                             )
                             field_count += 1
                 elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):

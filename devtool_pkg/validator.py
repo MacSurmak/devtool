@@ -188,7 +188,6 @@ class _StrictArchitecturalASTInvariants(ast.NodeVisitor):
         self._file_path: str = file_path
         self._lines: list[str] = source.splitlines()
         self.violations: list[RuleViolation] = []
-        self._awaited_calls: set[int] = set()
 
     def _add(
         self,
@@ -207,12 +206,6 @@ class _StrictArchitecturalASTInvariants(ast.NodeVisitor):
                 message=message,
             )
         )
-
-    def visit_Await(self, node: ast.Await) -> None:
-        """Record awaited call nodes so async network/queue .get() calls are not misflagged as dict fallbacks."""
-        if isinstance(node.value, ast.Call):
-            self._awaited_calls.add(id(node.value))
-        self.generic_visit(node)
 
     def visit_Module(self, node: ast.Module) -> None:
         """Enforce explicit type annotations and immutability on module-level variables."""
@@ -504,20 +497,21 @@ class _StrictArchitecturalASTInvariants(ast.NodeVisitor):
                     ),
                 )
             elif attr_name == "get":
-                is_awaited = id(node) in self._awaited_calls
-                has_args = len(node.args) >= 1
-                has_http_kwargs = any(
-                    kw.arg in ("headers", "params", "timeout", "cookies")
-                    for kw in node.keywords
+                has_default_arg = True if len(node.args) >= 2 else any(
+                    kw.arg == "default" for kw in node.keywords
                 )
-                if not is_awaited and has_args and not has_http_kwargs:
+                is_os_environ = (
+                    isinstance(node.func.value, ast.Attribute)
+                    and node.func.value.attr == "environ"
+                )
+                if has_default_arg or is_os_environ:
                     self._add(
                         lineno=node.lineno,
                         rule_id="NO-FALLBACK-CALLS",
                         law_ref="Law I.3 (No Hidden Defaults or Fallbacks)",
                         message=(
-                            "Dictionary '.get()' is prohibited because it masks missing keys with None/default. "
-                            "Use direct key indexing d[k] with explicit contract validation."
+                            "Calling '.get(key, default)' or 'os.environ.get()' is prohibited. "
+                            "Validate required keys explicitly without fallback values."
                         ),
                     )
             elif attr_name in BANNED_FS_HEURISTIC_METHODS:
@@ -546,54 +540,23 @@ class _StrictArchitecturalASTInvariants(ast.NodeVisitor):
 
         self.generic_visit(node)
 
-    def _is_boolean_predicate(self, expr: ast.AST) -> bool:
-        """Return True if an AST expression is a pure boolean comparison or predicate."""
-        if isinstance(expr, ast.Compare):
-            return True
-        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
-            return True
-        if isinstance(expr, ast.Call):
-            if isinstance(expr.func, ast.Name) and expr.func.id in (
-                "isinstance",
-                "issubclass",
-                "hasattr",
-                "any",
-                "all",
-                "bool",
-                "callable",
-            ):
-                return True
-            if isinstance(expr.func, ast.Attribute) and expr.func.attr in (
-                "startswith",
-                "endswith",
-                "isdigit",
-                "isalpha",
-                "isalnum",
-                "isspace",
-                "isupper",
-                "islower",
-                "exists",
-                "is_file",
-                "is_dir",
-                "is_absolute",
-                "match",
-            ):
-                return True
-        return False
-
     def _check_or_fallback_expr(self, expr: ast.AST) -> None:
-        """Flag value-fallback usage of 'or' while permitting pure boolean expressions."""
+        """Flag value-fallback usage of 'or' when the fallback operand is a non-boolean literal or container."""
         if isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.Or):
-            all_predicates = all(
-                self._is_boolean_predicate(val) for val in expr.values
-            )
-            if not all_predicates:
+            rightmost = expr.values[-1]
+            is_fallback = False
+            if isinstance(rightmost, (ast.List, ast.Dict, ast.Set, ast.Tuple)):
+                is_fallback = True
+            elif isinstance(rightmost, ast.Constant):
+                if not isinstance(rightmost.value, bool) and rightmost.value is not None:
+                    is_fallback = True
+            if is_fallback:
                 self._add(
                     lineno=expr.lineno,
                     rule_id="NO-FALLBACK-OR",
                     law_ref="Law I.3 (No Implicit 'or' Fallbacks)",
                     message=(
-                        "Using 'x or fallback' as a value fallback expression is prohibited. "
+                        "Using 'x or <default_literal>' as a value fallback is prohibited. "
                         "Use explicit conditional validation."
                     ),
                 )
