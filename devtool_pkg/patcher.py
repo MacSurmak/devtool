@@ -45,7 +45,6 @@ from devtool_pkg.validator import (
     format_violation_report,
     validate_commit_message,
     validate_file_content,
-    validate_text_block_for_omissions,
 )
 
 
@@ -439,25 +438,6 @@ def apply_patch(
                     ("REPLACE", rel_p, True, "100% exact match")
                 )
 
-    per_file_violation_counts: dict[str, int] = {}
-    for v in all_violations:
-        base_file = v.file_path.split(" (")[0]
-        per_file_violation_counts[base_file] = (
-            per_file_violation_counts[base_file] + 1
-            if base_file in per_file_violation_counts
-            else 1
-        )
-
-    for rel_p, final_content in staged_files.items():
-        file_violations = validate_file_content(rel_p, final_content)
-        all_violations.extend(file_violations)
-        if file_violations:
-            per_file_violation_counts[rel_p] = (
-                per_file_violation_counts[rel_p] + len(file_violations)
-                if rel_p in per_file_violation_counts
-                else len(file_violations)
-            )
-
     op_totals_per_file: dict[tuple[str, str], int] = {}
     for op_type, rel_p, _, _ in preliminary_statuses:
         key = (op_type, rel_p)
@@ -466,8 +446,10 @@ def apply_patch(
         )
 
     op_seen_counts: dict[tuple[str, str], int] = {}
-    final_statuses: list[OperationStatus] = []
-    for op_type, rel_p, stage_ok, stage_detail in preliminary_statuses:
+    numbered_ops: list[tuple[str, str, bool, str, OrderedPatchOp]] = []
+    for idx_op, (op_type, rel_p, stage_ok, stage_detail) in enumerate(
+        preliminary_statuses
+    ):
         key = (op_type, rel_p)
         current_idx = op_seen_counts[key] + 1 if key in op_seen_counts else 1
         op_seen_counts[key] = current_idx
@@ -476,12 +458,91 @@ def apply_patch(
             if op_totals_per_file[key] > 1
             else op_type
         )
+        numbered_ops.append(
+            (label_type, rel_p, stage_ok, stage_detail, parsed.ordered_ops[idx_op])
+        )
 
-        v_count = (
-            per_file_violation_counts[rel_p]
-            if rel_p in per_file_violation_counts
+    block_line_ranges: dict[tuple[str, str], tuple[int, int]] = {}
+    for label_type, rel_p, stage_ok, _, ord_op in numbered_ops:
+        if not stage_ok or rel_p not in staged_files:
+            continue
+        final_text = staged_files[rel_p]
+        total_lines = len(final_text.splitlines())
+        if ord_op.op_type == "CREATE":
+            block_line_ranges[(label_type, rel_p)] = (1, max(1, total_lines))
+        elif ord_op.op_type == "REPLACE" and ord_op.replace_op is not None:
+            rep_b = ord_op.replace_op.replace_block
+            pos = final_text.find(rep_b)
+            if pos != -1:
+                start_ln = final_text[:pos].count("\n") + 1
+                end_ln = start_ln + rep_b.count("\n")
+                block_line_ranges[(label_type, rel_p)] = (start_ln, end_ln)
+
+    in_block_counts: dict[tuple[str, str], int] = {}
+    legacy_warnings: list[RuleViolation] = []
+
+    for rel_p, final_content in staged_files.items():
+        post_apply_violations = validate_file_content(rel_p, final_content)
+        for fv in post_apply_violations:
+            matched_block_label = ""
+            for (lbl, r_path), (s_ln, e_ln) in block_line_ranges.items():
+                if r_path == rel_p and s_ln <= fv.line_number <= e_ln:
+                    matched_block_label = lbl
+                    in_block_counts[(lbl, r_path)] = (
+                        in_block_counts[(lbl, r_path)] + 1
+                        if (lbl, r_path) in in_block_counts
+                        else 1
+                    )
+                    break
+
+            if matched_block_label or fv.rule_id == "RUFF-SYNTAX":
+                tag = matched_block_label if matched_block_label else "FILE-SYNTAX"
+                all_violations.append(
+                    RuleViolation(
+                        file_path=fv.file_path,
+                        line_number=fv.line_number,
+                        rule_id=fv.rule_id,
+                        law_reference=fv.law_reference,
+                        code_snippet=fv.code_snippet,
+                        message=f"[INSIDE {tag}] {fv.message}",
+                    )
+                )
+            else:
+                legacy_warnings.append(
+                    RuleViolation(
+                        file_path=fv.file_path,
+                        line_number=fv.line_number,
+                        rule_id=fv.rule_id,
+                        law_reference=fv.law_reference,
+                        code_snippet=fv.code_snippet,
+                        message=f"[UNTOUCHED LEGACY CODE] {fv.message}",
+                    )
+                )
+
+    structural_by_file: dict[str, int] = {}
+    for sv in parsed.structural_violations:
+        base_f = sv.file_path.split(" (")[0]
+        structural_by_file[base_f] = (
+            structural_by_file[base_f] + 1 if base_f in structural_by_file else 1
+        )
+
+    final_statuses: list[OperationStatus] = []
+    for label_type, rel_p, stage_ok, stage_detail, _ in numbered_ops:
+        rng = (
+            block_line_ranges[(label_type, rel_p)]
+            if (label_type, rel_p) in block_line_ranges
+            else None
+        )
+        range_str = f"lines {rng[0]}..{rng[1]}, " if rng is not None else ""
+        b_count = (
+            in_block_counts[(label_type, rel_p)]
+            if (label_type, rel_p) in in_block_counts
             else 0
         )
+        s_count = (
+            structural_by_file[rel_p] if rel_p in structural_by_file else 0
+        )
+
         if not stage_ok:
             final_statuses.append(
                 OperationStatus(
@@ -491,13 +552,14 @@ def apply_patch(
                     detail=stage_detail,
                 )
             )
-        elif v_count > 0:
+        elif b_count > 0 or s_count > 0:
+            total_err = b_count + s_count
             final_statuses.append(
                 OperationStatus(
                     op_type=label_type,
                     rel_path=rel_p,
                     passed=False,
-                    detail=f"{stage_detail}, file violations: {v_count}",
+                    detail=f"{range_str}{stage_detail}, {total_err} blocking violation(s) in patch",
                 )
             )
         else:
@@ -506,7 +568,7 @@ def apply_patch(
                     op_type=label_type,
                     rel_path=rel_p,
                     passed=True,
-                    detail=f"{stage_detail}, 0 violations",
+                    detail=f"{range_str}{stage_detail}, 0 violations in block",
                 )
             )
 
@@ -524,6 +586,23 @@ def apply_patch(
         icon = "✅" if st.passed else "❌"
         print(f"  {icon} {st.op_type:<11} {st.rel_path} ({st.detail})")
     print("─" * 76)
+
+    if legacy_warnings:
+        warn_by_file: dict[str, list[int]] = {}
+        for lw in legacy_warnings:
+            if lw.file_path not in warn_by_file:
+                warn_by_file[lw.file_path] = []
+            warn_by_file[lw.file_path].append(lw.line_number)
+        print(
+            f"\n⚠️  Non-blocking legacy warnings outside patch blocks ({len(legacy_warnings)} total):"
+        )
+        for wf, wlines in sorted(warn_by_file.items()):
+            uniq_w = sorted(set(wlines))
+            preview = ", ".join(str(x) for x in uniq_w[:12])
+            if len(uniq_w) > 12:
+                preview += f" (+{len(uniq_w) - 12} more)"
+            print(f"   • {wf}: {len(wlines)} warning(s) on untouched lines [{preview}]")
+        print()
 
     for rel_p in sorted(deleted_paths):
         target = resolve_path(rel_p, ws.root)
