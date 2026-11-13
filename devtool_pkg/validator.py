@@ -160,7 +160,11 @@ def _run_ruff_json_check(rel_path: str, content: str) -> list[RuleViolation]:
     lines = content.splitlines()
     violations: list[RuleViolation] = []
     for item in diagnostics:
-        code_val = str(item["code"]) if "code" in item and item["code"] is not None else "SYNTAX"
+        raw_code = item["code"] if "code" in item else None
+        if raw_code is None or str(raw_code) in ("invalid-syntax", "E999", "SYNTAX"):
+            code_val = "SYNTAX"
+        else:
+            code_val = str(raw_code)
         msg_val = str(item["message"]) if "message" in item else "Linter violation"
         lineno = 1
         if "location" in item and isinstance(item["location"], dict):

@@ -222,43 +222,43 @@ TEXT_EXTENSIONS: Final[frozenset[str]] = frozenset(
 )
 
 COMMIT_PATTERN: Final[re.Pattern[str]] = re.compile(
-    rf"^{OPEN_MARK}\s*COMMIT\s*\n(.*?)\n{CLOSE_MARK}\s*COMMIT",
+    rf"^(?<!<){OPEN_MARK}(?!<)[ \t]*COMMIT[ \t]*\n(.*?)\n(?<!>){CLOSE_MARK}(?!>)[ \t]*COMMIT",
     re.DOTALL,
 )
 
 CREATE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    rf"^[ \t]*{OPEN_MARK}\s*CREATE:\s*([^\n\r]+?)[ \t]*\n"
+    rf"^(?<!<){OPEN_MARK}(?!<)[ \t]*CREATE:[ \t]*([^\n\r]+?)[ \t]*\n"
     rf"(.*?)"
-    rf"(?:\n|^)[ \t]*{CLOSE_MARK}+[ \t]*(CREATE|REPLACE)[ \t]*",
+    rf"(?:\n|^)(?<!>){CLOSE_MARK}(?!>)[ \t]*(CREATE|REPLACE)[ \t]*",
     re.DOTALL | re.MULTILINE,
 )
 
 DELETE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    rf"^[ \t]*{OPEN_MARK}\s*DELETE:\s*([^\n\r]+?)[ \t]*\n"
-    rf"(?:\n|^)[ \t]*{CLOSE_MARK}+[ \t]*DELETE[ \t]*",
+    rf"^(?<!<){OPEN_MARK}(?!<)[ \t]*DELETE:[ \t]*([^\n\r]+?)[ \t]*\n"
+    rf"(?:\n|^)(?<!>){CLOSE_MARK}(?!>)[ \t]*DELETE[ \t]*",
     re.MULTILINE,
 )
 
 REPLACE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    rf"^[ \t]*{OPEN_MARK}\s*SEARCH:\s*([^\n\r]+?)[ \t]*\n"
-    rf"((?:(?!\n[ \t]*{OPEN_MARK}|\n[ \t]*{SEP_MARK}+[ \t]*\n|\n[ \t]*{CLOSE_MARK}+).)*?)\n"
-    rf"[ \t]*{SEP_MARK}+[ \t]*\n"
-    rf"((?:(?!\n[ \t]*{OPEN_MARK}|\n[ \t]*{CLOSE_MARK}+).)*?)"
-    rf"(?:\n|^)[ \t]*{CLOSE_MARK}+[ \t]*REPLACE[ \t]*",
+    rf"^(?<!<){OPEN_MARK}(?!<)[ \t]*SEARCH:[ \t]*([^\n\r]+?)[ \t]*\n"
+    rf"((?:(?!\n(?<!<){OPEN_MARK}(?!<)|\n(?<!=){SEP_MARK}(?!=)[ \t]*\n|\n(?<!>){CLOSE_MARK}(?!>)).)*?)\n"
+    rf"(?<!=){SEP_MARK}(?!=)[ \t]*\n"
+    rf"((?:(?!\n(?<!<){OPEN_MARK}(?!<)|\n(?<!>){CLOSE_MARK}(?!>)).)*?)"
+    rf"(?:\n|^)(?<!>){CLOSE_MARK}(?!>)[ \t]*REPLACE[ \t]*",
     re.DOTALL | re.MULTILINE,
 )
 
 HEADER_SEARCH_PATTERN: Final[re.Pattern[str]] = re.compile(
-    rf"^[ \t]*{OPEN_MARK}\s*SEARCH:\s*([^\n\r]+)",
+    rf"^(?<!<){OPEN_MARK}(?!<)[ \t]*SEARCH:[ \t]*([^\n\r]+)",
     re.MULTILINE,
 )
 
 HEADER_CREATE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    rf"^[ \t]*{OPEN_MARK}\s*CREATE:\s*([^\n\r]+)",
+    rf"^(?<!<){OPEN_MARK}(?!<)[ \t]*CREATE:[ \t]*([^\n\r]+)",
     re.MULTILINE,
 )
 
 HEADER_DELETE_PATTERN: Final[re.Pattern[str]] = re.compile(
-    rf"^[ \t]*{OPEN_MARK}\s*DELETE:\s*([^\n\r]+)",
+    rf"^(?<!<){OPEN_MARK}(?!<)[ \t]*DELETE:[ \t]*([^\n\r]+)",
     re.MULTILINE,
 )
